@@ -149,7 +149,7 @@ void renderExecuteFrame(const Frame& frame)
 
             models[light.idxModel].renderLightSource = true;
             assert(materials.size() == 2); // assimp loads dummy material
-            materials.back().colorDiffuse = vec3(2.5f);
+            materials.back().colorDiffuse = vec3(3.5f);
         }
 
         loadModel("data/sponza/sponza.obj", models, meshes, materials, textures, texIds);
@@ -302,8 +302,8 @@ void renderExecuteFrame(const Frame& frame)
             shader.uniform3f("colorDiffuse", material.colorDiffuse);
             shader.uniform3f("colorSpecular", material.colorSpecular);
 
-            shader.uniform1i("mapDiffuse", material.idxDiffuse && config.diffuse);
-            shader.uniform1i("mapSpecular", material.idxSpecular && config.specular);
+            shader.uniform1i("mapDiffuse", material.idxDiffuse);
+            shader.uniform1i("mapSpecular", material.idxSpecular);
             shader.uniform1i("mapNormal", material.idxNormal && config.normalMaps);
             shader.uniform1i("alphaTest", material.alphaTest);
 
