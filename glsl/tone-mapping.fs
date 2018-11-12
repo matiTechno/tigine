@@ -17,5 +17,5 @@ void main()
         return;
     }
 
-    outputColor = hdrColor / (hdrColor + vec4(1.0));
+    outputColor = vec4(1.0) - exp(-hdrColor);
 }
