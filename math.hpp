@@ -337,6 +337,9 @@ inline mat4 lookAt(vec3 pos, vec3 target, vec3 up)
 
 inline mat4 frustum(float right, float top, float near, float far)
 {
+    assert(near > 0.f);
+    assert(far > near);
+
     mat4 m;
     m.i = { near / right, 0.f, 0.f, 0.f };
     m.j = { 0.f, near / top, 0.f, 0.f };
@@ -355,11 +358,25 @@ inline float toRadians(float degrees)
 // fovy is in degrees
 inline mat4 perspective(float fovy, float aspect, float near, float far)
 {
-    assert(far > near);
     fovy = toRadians(fovy);
     float top = tanf(fovy) * near;
     float right = aspect * top;
     return frustum(right, top, near, far);
+}
+
+
+inline mat4 orthographic(float left, float right, float bottom, float top, float near,
+        float far)
+{
+    mat4 mat;
+
+    mat.i = {2.f / (right - left), 0.f, 0.f, 0.f};
+    mat.j = {0.f, 2.f / (top - bottom), 0.f, 0.f};
+    mat.k = {0.f, 0.f, -2.f / (far - near), 0.f};
+    mat.w = {-(right + left) / (right - left), -(top + bottom) / (top - bottom),
+            -(far + near) / (far - near), 1.f};
+
+    return mat;
 }
 
 // todo: 3x3 matrices, rotation around any axis

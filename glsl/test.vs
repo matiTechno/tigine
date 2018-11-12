@@ -9,15 +9,18 @@ layout(location = 4) in vec3 bitangent;
 uniform mat4 projection;
 uniform mat4 view;
 uniform mat4 model;
+uniform mat4 lightSpaceMatrix;
 
-out vec3 vPos;
+out vec3 vFragPos;
+out vec3 vFragPosLightSpace;
 out vec2 vTexCoord;
 out mat3 vTBN;
 
 void main()
 {
     vec4 pos = model * vec4(vertex, 1.0);
-    vPos = pos.xyz;
+    vFragPos = pos.xyz;
+    vFragPosLightSpace = vec3(lightSpaceMatrix * pos);
     gl_Position = projection * view * pos;
     vTexCoord = texCoord;
     vTexCoord.y = 1.0 - vTexCoord.y;

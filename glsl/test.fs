@@ -1,6 +1,7 @@
 #version 330
 
-in vec3 vPos;
+in vec3 vFragPos;
+in vec3 vFragPosLightSpace;
 in vec2 vTexCoord;
 in mat3 vTBN;
 
@@ -23,6 +24,8 @@ uniform bool mapSpecular;
 uniform sampler2D samplerNormal;
 uniform bool mapNormal;
 
+uniform sampler2D samplerShadowMap;
+
 uniform bool debugNormals;
 uniform bool blinnPhong;
 uniform bool enableAmbient;
@@ -31,6 +34,28 @@ uniform bool enableSpecular;
 uniform bool doLighting;
 
 out vec4 outputColor;
+
+float calcShadow()
+{
+    vec3 posWindowSpace = vFragPosLightSpace * 0.5 + 0.5;
+    float fragDepth = posWindowSpace.z;
+    float bias = 0.005;
+    float shadow = 0.0;
+    vec2 texelSize = vec2(1.0) / textureSize(samplerShadowMap, 0);
+
+    for(int x = -1; x <= 1; ++x)
+    {
+        for(int y = -1; y <= 1; ++y)
+        {
+            float closestDepth = texture2D(samplerShadowMap, posWindowSpace.xy +
+                vec2(x, y) * texelSize).r;
+
+            shadow += fragDepth > closestDepth + bias ? 1.0 : 0.0;
+        }
+    }
+
+    return shadow / 9.0;
+}
 
 void main()
 {
@@ -79,7 +104,7 @@ void main()
     if(mapSpecular)
         specular *= texture2D(samplerSpecular, vTexCoord).rgb;
 
-    vec3 viewDir = normalize(vPos - cameraPos);
+    vec3 viewDir = normalize(vFragPos - cameraPos);
 
     if(doLighting && blinnPhong)
     {
@@ -92,7 +117,9 @@ void main()
         specular *= pow( max( dot(-viewDir, reflectDir), 0.0 ), 32.0 );
     }
 
-    outputColor = vec4(ambient * vec3(enableAmbient) +
-                       diffuse * vec3(enableDiffuse) +
-                       specular * vec3(enableSpecular), 1.0);
+    float shadow = calcShadow();
+
+    outputColor = vec4(vec3(enableAmbient)  * ambient +
+                       vec3(enableDiffuse)  * (1.0 - shadow) * diffuse +
+                       vec3(enableSpecular) * (1.0 - shadow) * specular, 1.0);
 }

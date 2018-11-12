@@ -30,7 +30,7 @@ GLint getUniformLocation(const char* shaderId, const char* uname,
         if(uniform->name == nullptr) // delimiter
         {
             log("shader '%s': uniform '%s' is inactive", shaderId, uname);
-            return uniform->location;
+            return 666; // just to be sure it is not in range of valid uniforms
         }
 
         if(strcmp(uniform->name, uname) == 0)
@@ -108,6 +108,8 @@ Shader createShader(const char* vs, const char* fs)
         const char* buf = vsBuf.data();
         glShaderSource(vertex, 1, &buf, nullptr);
     }
+
+    log("compiling vertex shader:   %s", vs);
     glCompileShader(vertex);
 
     const GLuint fragment = glCreateShader(GL_FRAGMENT_SHADER);
@@ -115,6 +117,8 @@ Shader createShader(const char* vs, const char* fs)
         const char* buf = fsBuf.data();
         glShaderSource(fragment, 1, &buf, nullptr);
     }
+
+    log("compiling fragment shader: %s", fs);
     glCompileShader(fragment);
     
     {

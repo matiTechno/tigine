@@ -35,7 +35,8 @@ enum
     DIFFUSE,
     SPECULAR,
     NORMAL,
-    ALPHA
+    ALPHA,
+    SHADOW_MAP
 };
 
 struct Material
@@ -104,6 +105,8 @@ void renderExecuteFrame(const Frame& frame)
         bool srgbDiffuseTextures = true;
         bool srgbOutput = true;
         bool doLighting = true;
+        bool shadows = true;
+        bool debugShadowMap = false;
     } static config;
 
     struct
@@ -127,17 +130,31 @@ void renderExecuteFrame(const Frame& frame)
         GLuint depthBuffer;
     } static hdr;
 
+    struct ShadowMap
+    {
+        enum {SIZE = 4096};
+        GLuint depthBuffer;
+        GLuint framebuffer;
+        Shader shader;
+        Shader shaderDebug;
+    } static shadowMap;
+
     static bool init = true;
     if(init)
     {
         init = false;
-        shader = createShader("glsl/test.vs", "glsl/test.fs");
+
+        glDepthFunc(GL_LESS);
+        glCullFace(GL_BACK);
+        glFrontFace(GL_CCW);
+        glDisable(GL_BLEND);
+
         addTexture("data/uv.png", textures, texIds, false);
         materials.pushBack({});
 
         // light
         {
-            light.pos = vec3(1.f, 2.f, -0.3f) * 3000.f;
+            light.pos = vec3(0.6f, 2.f, -0.3f) * 3000.f;
 
             loadModel("data/sphere.obj", models, meshes, materials, textures,
                     texIds);
@@ -157,6 +174,8 @@ void renderExecuteFrame(const Frame& frame)
         log("number of meshes:    %d", meshes.size());
         log("number of textures:  %d", textures.size());
         log("number of materials: %d", materials.size());
+
+        shader = createShader("glsl/test.vs", "glsl/test.fs");
 
         camera.speed = 500.f;
 
@@ -199,6 +218,7 @@ void renderExecuteFrame(const Frame& frame)
             glBindFramebuffer(GL_FRAMEBUFFER, hdr.framebuffer);
             GLenum buf = GL_COLOR_ATTACHMENT0;
             glDrawBuffers(1, &buf);
+            glReadBuffer(GL_NONE); // just to be sure...
 
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                     GL_TEXTURE_2D, hdr.texture, 0);
@@ -206,7 +226,35 @@ void renderExecuteFrame(const Frame& frame)
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                     GL_TEXTURE_2D, hdr.depthBuffer, 0);
         }
-        
+
+        // shadow map
+        {
+            shadowMap.shader = createShader("glsl/shadow.vs", "glsl/shadow.fs");
+            shadowMap.shaderDebug = createShader("glsl/quad.vs", "glsl/shadowDebug.fs");
+
+            glGenTextures(1, &shadowMap.depthBuffer);
+            glBindTexture(GL_TEXTURE_2D, shadowMap.depthBuffer);
+
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+
+            // scene outside of shadow map will be not covered by shadow
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+            const float borderColor[] = {1.0f, 1.0f, 1.0f, 1.0f};
+            glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, ShadowMap::SIZE,
+                    ShadowMap::SIZE, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+
+            glGenFramebuffers(1, &shadowMap.framebuffer);
+            glBindFramebuffer(GL_FRAMEBUFFER, shadowMap.framebuffer);
+            glDrawBuffer(GL_NONE);
+            glReadBuffer(GL_NONE);
+
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D,
+                    shadowMap.depthBuffer, 0);
+        }
     }
 
     if(frame.quit)
@@ -233,6 +281,11 @@ void renderExecuteFrame(const Frame& frame)
         glDeleteTextures(1, &hdr.texture);
         glDeleteTextures(1, &hdr.depthBuffer);
 
+        deleteShader(shadowMap.shader);
+        deleteShader(shadowMap.shaderDebug);
+        glDeleteFramebuffers(1, &shadowMap.framebuffer);
+        glDeleteTextures(1, &shadowMap.depthBuffer);
+
         return;
     }
 
@@ -254,18 +307,59 @@ void renderExecuteFrame(const Frame& frame)
                 GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
     }
 
+    mat4 lightSpaceMatrix;
+    {
+        // this is hardcoded for sponza...
+        const float size = 1900.f;
+
+        // if target == up then lookAt() failes; this is a workaround
+        const vec3 lpos = light.pos + vec3(0.01f, 0.f, 0.f);
+
+        lightSpaceMatrix = orthographic(-size, size, -size, size, 0.01f, size * 1.5f) *
+            lookAt(normalize(lpos) * size, vec3(0.f), vec3(0.f, 1.f, 0.f));
+    }
+
+    // render shadow map
+    glBindFramebuffer(GL_FRAMEBUFFER, shadowMap.framebuffer);
+    glClear(GL_DEPTH_BUFFER_BIT);
+
+    if(config.shadows)
+    {
+        glViewport(0, 0, ShadowMap::SIZE, ShadowMap::SIZE);
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_CULL_FACE);
+
+        glUseProgram(shadowMap.shader.programId);
+        shadowMap.shader.uniformMat4("lightSpaceMatrix", lightSpaceMatrix);
+
+        for(const Model& model: models)
+        {
+            shadowMap.shader.uniformMat4("model", model.transform);
+
+            for(int i = 0; i < model.meshCount; ++i)
+            {
+                const Mesh& mesh = meshes[model.idxStart + i];
+
+                glBindVertexArray(mesh.vao);
+
+                if(mesh.indicesOffset)
+                {
+                    glDrawElements(GL_TRIANGLES, mesh.elementCount, GL_UNSIGNED_INT,
+                            reinterpret_cast<const void*>(mesh.indicesOffset));
+                }
+                else
+                    glDrawArrays(GL_TRIANGLES, 0, mesh.elementCount);
+            }
+        }
+    }
 
     // render models to the HDR buffer
     glBindFramebuffer(GL_FRAMEBUFFER, hdr.framebuffer);
     glViewport(0, 0, frame.bufferSize.x, frame.bufferSize.y);
-    glClearColor(0.1f, 0.1f, 1.f, 0.f); // sky color
+    glClearColor(0.1f, 0.1f, 1.f, 1.f); // sky color
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LESS);
     glEnable(GL_CULL_FACE);
-    glCullFace(GL_BACK);
-    glFrontFace(GL_CCW);
-    glDisable(GL_BLEND);
 
     glUseProgram(shader.programId);
 
@@ -279,6 +373,10 @@ void renderExecuteFrame(const Frame& frame)
 
     shader.uniform3f("lightColor", materials[
             meshes[ models[light.idxModel].idxStart ].idxMaterial ].colorDiffuse);
+
+    shader.uniformMat4("lightSpaceMatrix", lightSpaceMatrix);
+    shader.uniform1i("samplerShadowMap", SHADOW_MAP);
+    bindTexture(shadowMap.depthBuffer, SHADOW_MAP);
 
     shader.uniform1i("debugNormals", config.debugNormals);
     shader.uniform1i("blinnPhong", config.blinnPhong);
@@ -348,22 +446,40 @@ void renderExecuteFrame(const Frame& frame)
     glViewport(0, 0, frame.bufferSize.x, frame.bufferSize.y);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
-    glDisable(GL_BLEND);
-
-    glBindVertexArray(quad.vao);
-    bindTexture(hdr.texture, DIFFUSE);
 
     glUseProgram(hdr.shaderToneMapping.programId);
     hdr.shaderToneMapping.uniform1i("sampler", DIFFUSE);
     hdr.shaderToneMapping.uniform1i("toneMapping", config.toneMapping &&
             !config.debugNormals);
 
-    if(config.srgbOutput)
-        glEnable(GL_FRAMEBUFFER_SRGB);
+    bindTexture(hdr.texture, DIFFUSE);
+    glBindVertexArray(quad.vao);
 
+    if(config.srgbOutput) glEnable(GL_FRAMEBUFFER_SRGB);
     glDrawArrays(GL_TRIANGLES, 0, 6);
-
     glDisable(GL_FRAMEBUFFER_SRGB);
+
+    // render debug shadow map
+    if(config.debugShadowMap)
+    {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+        const int size = min( min(frame.bufferSize.x, frame.bufferSize.y),
+                int(ShadowMap::SIZE) );
+        glViewport(0, 0, size, size);
+
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+
+        glUseProgram(shadowMap.shaderDebug.programId);
+        hdr.shaderToneMapping.uniform1i("sampler", DIFFUSE);
+        bindTexture(shadowMap.depthBuffer, DIFFUSE);
+        glBindVertexArray(quad.vao);
+
+        glEnable(GL_FRAMEBUFFER_SRGB);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glDisable(GL_FRAMEBUFFER_SRGB);
+    }
 
     if(!frame.showGui)
         return;
@@ -381,6 +497,8 @@ void renderExecuteFrame(const Frame& frame)
     ImGui::Checkbox("sRGB diffuse textures", &config.srgbDiffuseTextures);
     ImGui::Checkbox("sRGB output", &config.srgbOutput);
     ImGui::Checkbox("do lighting", &config.doLighting);
+    ImGui::Checkbox("shadows", &config.shadows);
+    ImGui::Checkbox("debug shadow map", &config.debugShadowMap);
     ImGui::End();
 }
 
