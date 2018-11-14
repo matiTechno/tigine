@@ -1,23 +1,14 @@
-#include "glad.h" // glad must be defined before glfw3.h
-
-#include "Texture.cpp"
-#include "Shader.cpp"
-#include "Camera.cpp"
-#include "render.cpp"
-#include "glad.c"
-#include "imgui/imgui.cpp"
-#include "imgui/imgui_demo.cpp"
-#include "imgui/imgui_draw.cpp"
-#include "imgui/imgui_impl_glfw_gl3.cpp"
-
 #include "api.hpp"
 #include "Array.hpp"
+#include "imgui/imgui.h"
+#include "imgui/imgui_impl_glfw_gl3.h"
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
 
+#include "glad.h"
 #include <GLFW/glfw3.h>
 #ifndef GLFW_TRUE // WA for older ubuntu systems
 #define GLFW_TRUE 1
