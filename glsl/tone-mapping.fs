@@ -13,7 +13,7 @@ void main()
 
     if(!toneMapping)
     {
-        outputColor = min(vec4(1.0), hdrColor);
+        outputColor = hdrColor;
         return;
     }
 

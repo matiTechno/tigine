@@ -4,7 +4,7 @@ in vec2 vTexCoord;
 
 out vec4 outputColor;
 
-uniform vec3 lightDir;
+uniform vec3 uLightDir;
 uniform vec3 lightColor;
 uniform vec3 cameraPos;
 uniform mat4 lightSpaceMatrix;
@@ -13,6 +13,11 @@ uniform sampler2D samplerPosition;
 uniform sampler2D samplerNormal;
 uniform sampler2D samplerDiffuse;
 uniform sampler2D samplerSpecular;
+
+uniform int enableAmbient;
+uniform int enableDiffuse;
+uniform int enableSpecular;
+uniform bool blinnPhong;
 
 uniform sampler2D samplerShadowMap;
 
@@ -44,6 +49,8 @@ void main()
     vec3 specularSample = texture2D(samplerSpecular, vTexCoord).rgb;
     vec3 normal = texture2D(samplerNormal, vTexCoord).rgb;
     vec3 position = texture2D(samplerPosition, vTexCoord).rgb;
+    vec3 lightDir = normalize(uLightDir); // just to be sure
+
 
     vec3 ambient = diffuseSample * lightColor * 0.01;
 
@@ -51,10 +58,25 @@ void main()
 
     vec3 specular = specularSample;
     vec3 viewDir = normalize(position - cameraPos);
-    vec3 h = normalize(-lightDir + -viewDir);
-    specular *= pow( max( dot(h, normal), 0.0 ), 10.0 );
+    const float specularExponent = 10.0;
+
+    if(blinnPhong)
+    {
+        vec3 h = normalize(-lightDir + -viewDir);
+        specular *= pow( max( dot(h, normal), 0.0 ), specularExponent );
+    }
+    else
+    {
+
+        vec3 reflectDir = reflect(lightDir, normal);
+        specular *= pow( max( dot(-viewDir, reflectDir), 0.0 ), specularExponent );
+    }
 
     float shadow = calcShadow( (lightSpaceMatrix * vec4(position, 1.0)).xyz );
 
-    outputColor = vec4(ambient + (1.0 - shadow) *diffuse + (1.0 - shadow) * specular, 1.0);
+    outputColor = vec4(
+        enableAmbient  * ambient +
+        enableDiffuse  * (1.0 - shadow) * diffuse +
+        enableSpecular * (1.0 - shadow) * specular,
+        1.0);
 }

@@ -16,7 +16,12 @@ struct Shader
 {
     GLuint programId;
     UniformL uniforms[32];
-    const char* id;
+    char* id;
+
+    void bind()
+    {
+        glUseProgram(programId);
+    }
 
     void uniform1i(const char* uname, int v)
     {

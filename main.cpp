@@ -169,7 +169,7 @@ int main()
                 ImGui::End();
             }
 
-            ImGui::Begin("fps");
+            ImGui::Begin("frame times");
             {
                 float maxTime = 0.f;
                 float sum = 0.f;

@@ -20,6 +20,8 @@ void deleteShader(Shader& shader)
         free(it->name);
         ++it;
     }
+
+    free(shader.id);
 }
 
 GLint getUniformLocation(const char* shaderId, const char* uname,
@@ -92,7 +94,14 @@ static void loadFile(const char* filename, Array<char>& buf)
 Shader createShader(const char* vs, const char* fs)
 {
     Shader shader;
-    shader.id = fs;
+
+    // just use std::string...
+    {
+        const int size = strlen(fs) + 1;
+        shader.id = (char*)malloc(size);
+        memcpy(shader.id, fs, size);
+    }
+
     shader.programId = 0;
 
     Array<char> vsBuf, fsBuf;
@@ -109,8 +118,9 @@ Shader createShader(const char* vs, const char* fs)
         glShaderSource(vertex, 1, &buf, nullptr);
     }
 
-    log("compiling vertex shader:   %s", vs);
     glCompileShader(vertex);
+    const bool vertexError = isCompileError(vertex);
+    if(vertexError) log("vertex shader compilation failed: %s", vs);
 
     const GLuint fragment = glCreateShader(GL_FRAGMENT_SHADER);
     {
@@ -118,19 +128,15 @@ Shader createShader(const char* vs, const char* fs)
         glShaderSource(fragment, 1, &buf, nullptr);
     }
 
-    log("compiling fragment shader: %s", fs);
     glCompileShader(fragment);
-    
-    {
-        const bool vertexError = isCompileError(vertex);
-        const bool fragmentError = isCompileError(fragment);
+    const bool fragmentError = isCompileError(fragment);
+    if(fragmentError) log("fragment shader compilation failed: %s", fs);
 
-        if(vertexError || fragmentError)
-        {
-            glDeleteShader(vertex);
-            glDeleteShader(fragment);
-            return shader;
-        }
+    if(vertexError || fragmentError)
+    {
+        glDeleteShader(vertex);
+        glDeleteShader(fragment);
+        return shader;
     }
 
     const GLuint program = glCreateProgram();
@@ -174,7 +180,7 @@ Shader createShader(const char* vs, const char* fs)
     {
         char buffer[512];
         glGetProgramInfoLog(program, sizeof(buffer), nullptr, buffer);
-        log("glLinkProgram() error:\n%s", buffer);
+        log("%s: glLinkProgram() error:\n%s", shader.id, buffer);
         glDeleteProgram(program);
         return shader;
     }

@@ -17,27 +17,40 @@ struct Mesh
 {
     GLuint vao;
     GLuint bo;
-    int elementCount;
-    int indicesOffset = 0; // if 0 elementCount refers to vertices else to indices
+    int numIndices;
+    int indicesOffset = 0;
     int idxMaterial = 0;
 };
 
 struct Model
 {
-    int idxStart;
+    int idxMesh;
     int meshCount = 0;
     mat4 transform;
-    bool renderLightSource = false;
 };
 
 enum
 {
-    DIFFUSE,
-    SPECULAR,
-    NORMAL,
-    ALPHA,
-    SHADOW_MAP,
-    POSITION
+    UNIT_DEFAULT,
+    UNIT_DIFFUSE,
+    UNIT_SPECULAR,
+    UNIT_NORMAL,
+    UNIT_ALPHA,
+    UNIT_SHADOW_MAP,
+    UNIT_POSITION
+};
+
+enum
+{
+    VIEW_DEPTH,
+    VIEW_POSITIONS,
+    VIEW_NORMALS,
+    VIEW_TEXTURE_DIFFUSE,
+    VIEW_TEXTURE_SPECULAR,
+    VIEW_WIREFRAME,
+    VIEW_SHADOWMAP,
+    VIEW_FINAL,
+    VIEW_COUNT
 };
 
 struct Material
@@ -85,12 +98,17 @@ static int addTexture(const char* filename, Array<GLuint>& textures,
 
 void renderExecuteFrame(const Frame& frame)
 {
-    static Array<Mesh> meshes;
+    static Model sphereModel;
     static Array<Model> models;
+    static Array<Mesh> meshes;
+    static Array<Material> materials;
     static Array<GLuint> textures;
     static Array<TexId> texIds;
-    static Array<Material> materials;
     static Camera3d camera;
+    static Shader shaderPlainColor;
+    static Shader shaderDepth;
+    static ivec2 prevFramebufferSize = ivec2(-1);
+    static int outputView = VIEW_FINAL;
 
     struct
     {
@@ -98,22 +116,20 @@ void renderExecuteFrame(const Frame& frame)
         bool diffuse = true;
         bool specular = true;
         bool normalMaps = true;
-        bool debugUvs = false;
-        bool debugNormals = false;
         bool blinnPhong = true;
         bool toneMapping = true;
         bool srgbDiffuseTextures = true;
         bool srgbOutput = true;
-        bool doLighting = true;
         bool shadows = true;
-        bool debugShadowMap = false;
+        bool debugUvs = false;
     } static config;
 
     struct
     {
-        vec3 pos; // direction == normalize(-pos)
+        vec3 pos = vec3(0.6f, 2.f, -0.3f) * 3000.f; // direction == normalize(-pos)
         int idxModel;
         float scale = 100.f;
+        vec3 color = vec3(5.f);
     } static light;
 
     struct
@@ -121,23 +137,6 @@ void renderExecuteFrame(const Frame& frame)
         GLuint vao;
         GLuint bo;
     } static quad;
-
-    struct
-    {
-        Shader shaderToneMapping;
-        Shader shaderLightPass;
-        GLuint framebuffer;
-        GLuint texture;
-    } static hdr;
-
-    struct ShadowMap
-    {
-        enum {SIZE = 4096};
-        GLuint depthBuffer;
-        GLuint framebuffer;
-        Shader shader;
-        Shader shaderDebug;
-    } static shadowMap;
 
     struct
     {
@@ -150,6 +149,22 @@ void renderExecuteFrame(const Frame& frame)
         Shader shader;
     } static gbuffer;
 
+    struct ShadowMap
+    {
+        enum {SIZE = 4096};
+        GLuint depthBuffer;
+        GLuint framebuffer;
+        Shader shader;
+    } static shadowMap;
+
+    struct
+    {
+        Shader shaderToneMapping;
+        Shader shaderLightPass;
+        GLuint framebuffer;
+        GLuint texture;
+    } static hdr;
+
     static bool init = true;
     if(init)
     {
@@ -160,33 +175,26 @@ void renderExecuteFrame(const Frame& frame)
         glFrontFace(GL_CCW);
         glDisable(GL_BLEND);
 
+        shaderPlainColor = createShader("glsl/plain-color.vs", "glsl/plain-color.fs");
+
+        shaderDepth = createShader("glsl/quad.vs", "glsl/depth.fs");
+        shaderDepth.bind();
+        shaderDepth.uniform1i("sampler", UNIT_DEFAULT);
+
         addTexture("data/uv.png", textures, texIds, false);
         materials.pushBack({});
 
-        // light
+        loadModel("data/sphere.obj", models, meshes, materials, textures, texIds);
+
+        if(models.empty())
         {
-            light.pos = vec3(0.6f, 2.f, -0.3f) * 3000.f;
-
-            loadModel("data/sphere.obj", models, meshes, materials, textures,
-                    texIds);
-
-            if(models.empty())
-            {
-                printf("run application from top source directory!\n"
-                       "or sphere model is missing; assert(false);\n");
-
-                assert(false);
-            }
-            
-            light.idxModel = models.size() - 1;
-
-            models[light.idxModel].transform = translate(light.pos) *
-                scale(vec3(light.scale));
-
-            models[light.idxModel].renderLightSource = true;
-            assert(materials.size() == 2); // assimp loads dummy material
-            materials.back().colorDiffuse = vec3(3.5f);
+            printf("missing data/sphere.obj, run application from top source directory\n");
+            assert(false);
         }
+
+        // hack
+        sphereModel = models.front();
+        models.popBack();
 
         loadModel("data/sponza/sponza.obj", models, meshes, materials, textures, texIds);
 
@@ -219,29 +227,41 @@ void renderExecuteFrame(const Frame& frame)
             glEnableVertexAttribArray(0);
         }
 
-        // hdr
+        // shadow map
         {
-            hdr.shaderToneMapping = createShader("glsl/quad.vs", "glsl/tone-mapping.fs");
-            hdr.shaderLightPass = createShader("glsl/quad.vs", "glsl/light.fs");
+            shadowMap.shader = createShader("glsl/shadow.vs", "glsl/shadow.fs");
 
-            glGenTextures(1, &hdr.texture);
-            glBindTexture(GL_TEXTURE_2D, hdr.texture);
+            glGenTextures(1, &shadowMap.depthBuffer);
+            glBindTexture(GL_TEXTURE_2D, shadowMap.depthBuffer);
+
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 
-            glGenFramebuffers(1, &hdr.framebuffer);
-            glBindFramebuffer(GL_FRAMEBUFFER, hdr.framebuffer);
-            GLenum buf = GL_COLOR_ATTACHMENT0;
-            glDrawBuffers(1, &buf);
-            glReadBuffer(GL_NONE); // just to be sure...
+            // scene outside of a shadow map will be not covered by shadow
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+            const float borderColor[] = {1.0f, 1.0f, 1.0f, 1.0f};
+            glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
 
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                    GL_TEXTURE_2D, hdr.texture, 0);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, ShadowMap::SIZE,
+                    ShadowMap::SIZE, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+
+            glGenFramebuffers(1, &shadowMap.framebuffer);
+            glBindFramebuffer(GL_FRAMEBUFFER, shadowMap.framebuffer);
+            glDrawBuffer(GL_NONE);
+            glReadBuffer(GL_NONE);
+
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D,
+                    shadowMap.depthBuffer, 0);
         }
 
         // gbuffer
         {
             gbuffer.shader = createShader("glsl/gbuffer.vs", "glsl/gbuffer.fs");
+            gbuffer.shader.bind();
+            gbuffer.shader.uniform1i("samplerDiffuse", UNIT_DIFFUSE);
+            gbuffer.shader.uniform1i("samplerSpecular", UNIT_SPECULAR);
+            gbuffer.shader.uniform1i("samplerNormal", UNIT_NORMAL);
 
             glGenTextures(1, &gbuffer.depthBuffer);
             glBindTexture(GL_TEXTURE_2D, gbuffer.depthBuffer);
@@ -290,71 +310,44 @@ void renderExecuteFrame(const Frame& frame)
                     GL_TEXTURE_2D, gbuffer.colorSpecular, 0);
         }
 
-        // shadow map
+        // hdr
         {
-            shadowMap.shader = createShader("glsl/shadow.vs", "glsl/shadow.fs");
-            shadowMap.shaderDebug = createShader("glsl/quad.vs", "glsl/shadowDebug.fs");
+            hdr.shaderToneMapping = createShader("glsl/quad.vs", "glsl/tone-mapping.fs");
+            hdr.shaderToneMapping.bind();
+            hdr.shaderToneMapping.uniform1i("sampler", UNIT_DEFAULT);
 
-            glGenTextures(1, &shadowMap.depthBuffer);
-            glBindTexture(GL_TEXTURE_2D, shadowMap.depthBuffer);
+            hdr.shaderLightPass = createShader("glsl/quad.vs", "glsl/light.fs");
+            hdr.shaderLightPass.bind();
+            hdr.shaderLightPass.uniform1i("samplerPosition", UNIT_POSITION);
+            hdr.shaderLightPass.uniform1i("samplerNormal", UNIT_NORMAL);
+            hdr.shaderLightPass.uniform1i("samplerDiffuse", UNIT_DIFFUSE);
+            hdr.shaderLightPass.uniform1i("samplerSpecular", UNIT_SPECULAR);
+            hdr.shaderLightPass.uniform1i("samplerShadowMap", UNIT_SHADOW_MAP);
 
+            glGenTextures(1, &hdr.texture);
+            glBindTexture(GL_TEXTURE_2D, hdr.texture);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 
-            // scene outside of shadow map will be not covered by shadow
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-            const float borderColor[] = {1.0f, 1.0f, 1.0f, 1.0f};
-            glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+            glGenFramebuffers(1, &hdr.framebuffer);
+            glBindFramebuffer(GL_FRAMEBUFFER, hdr.framebuffer);
+            GLenum buf = GL_COLOR_ATTACHMENT0;
+            glDrawBuffers(1, &buf);
+            glReadBuffer(GL_NONE); // just to be sure...
 
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, ShadowMap::SIZE,
-                    ShadowMap::SIZE, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+            // needed for forward rendering pass;
+            // reuse the depth buffer from gbuffer
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                    GL_TEXTURE_2D, gbuffer.depthBuffer, 0);
 
-            glGenFramebuffers(1, &shadowMap.framebuffer);
-            glBindFramebuffer(GL_FRAMEBUFFER, shadowMap.framebuffer);
-            glDrawBuffer(GL_NONE);
-            glReadBuffer(GL_NONE);
-
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D,
-                    shadowMap.depthBuffer, 0);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                    GL_TEXTURE_2D, hdr.texture, 0);
         }
     }
 
     if(frame.quit)
     {
-        for(const Mesh& mesh: meshes)
-        {
-            glDeleteVertexArrays(1, &mesh.vao);
-            glDeleteBuffers(1, &mesh.bo);
-        }
-
-        for(GLuint& texture: textures)
-            glDeleteTextures(1, &texture);
-
-        for(TexId id: texIds)
-            free(id.filename);
-
-        glDeleteVertexArrays(1, &quad.vao);
-        glDeleteBuffers(1, &quad.bo);
-
-        deleteShader(hdr.shaderToneMapping);
-        deleteShader(hdr.shaderLightPass);
-        glDeleteFramebuffers(1, &hdr.framebuffer);
-        glDeleteTextures(1, &hdr.texture);
-
-        deleteShader(shadowMap.shader);
-        deleteShader(shadowMap.shaderDebug);
-        glDeleteFramebuffers(1, &shadowMap.framebuffer);
-        glDeleteTextures(1, &shadowMap.depthBuffer);
-
-        glDeleteFramebuffers(1, &gbuffer.framebuffer);
-        glDeleteTextures(1, &gbuffer.depthBuffer);
-        glDeleteTextures(1, &gbuffer.positions);
-        glDeleteTextures(1, &gbuffer.normals);
-        glDeleteTextures(1, &gbuffer.colorDiffuse);
-        glDeleteTextures(1, &gbuffer.colorSpecular);
-        deleteShader(gbuffer.shader);
-
+        // do the cleanup...
         return;
     }
 
@@ -363,40 +356,39 @@ void renderExecuteFrame(const Frame& frame)
 
     camera.update(frame.dt);
 
-    // do these only on resize event
-
-    // update hdr texture size
+    if(prevFramebufferSize != frame.bufferSize)
     {
         const ivec2 size = frame.bufferSize;
+        prevFramebufferSize = size;
 
-        glBindTexture(GL_TEXTURE_2D, hdr.texture);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, size.x, size.y, 0, GL_RGB, GL_FLOAT,
-                nullptr);
-    }
+        // gbuffer
+        {
+            glBindTexture(GL_TEXTURE_2D, gbuffer.depthBuffer);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, size.x, size.y, 0,
+                    GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
 
-    // update gbuffer texture sizes
-    {
-        const ivec2 size = frame.bufferSize;
+            glBindTexture(GL_TEXTURE_2D, gbuffer.positions);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, size.x, size.y, 0, GL_RGB, GL_FLOAT,
+                    nullptr);
 
-        glBindTexture(GL_TEXTURE_2D, gbuffer.depthBuffer);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, size.x, size.y, 0,
-                GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+            glBindTexture(GL_TEXTURE_2D, gbuffer.normals);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, size.x, size.y, 0, GL_RGB, GL_FLOAT,
+                    nullptr);
 
-        glBindTexture(GL_TEXTURE_2D, gbuffer.positions);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, size.x, size.y, 0, GL_RGB, GL_FLOAT,
-                nullptr);
+            glBindTexture(GL_TEXTURE_2D, gbuffer.colorDiffuse);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, size.x, size.y, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                    nullptr);
 
-        glBindTexture(GL_TEXTURE_2D, gbuffer.normals);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, size.x, size.y, 0, GL_RGB, GL_FLOAT,
-                nullptr);
-
-        glBindTexture(GL_TEXTURE_2D, gbuffer.colorDiffuse);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, size.x, size.y, 0, GL_RGBA, GL_UNSIGNED_BYTE,
-                nullptr);
-
-        glBindTexture(GL_TEXTURE_2D, gbuffer.colorSpecular);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, size.x, size.y, 0, GL_RGBA, GL_UNSIGNED_BYTE,
-                nullptr);
+            glBindTexture(GL_TEXTURE_2D, gbuffer.colorSpecular);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, size.x, size.y, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                    nullptr);
+        }
+        // hdr
+        {
+            glBindTexture(GL_TEXTURE_2D, hdr.texture);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, size.x, size.y, 0, GL_RGB, GL_FLOAT,
+                    nullptr);
+        }
     }
 
     mat4 lightSpaceMatrix;
@@ -411,53 +403,52 @@ void renderExecuteFrame(const Frame& frame)
             lookAt(normalize(lpos) * size, vec3(0.f), vec3(0.f, 1.f, 0.f));
     }
 
+    const mat4 projectionMatrix = perspective(45.f, (float)frame.bufferSize.x /
+                                              frame.bufferSize.y, 0.1f, 20000.f);
+
     // render shadow map
-    glBindFramebuffer(GL_FRAMEBUFFER, shadowMap.framebuffer);
-    glClear(GL_DEPTH_BUFFER_BIT);
-
-    if(config.shadows)
+    if(outputView == VIEW_FINAL || outputView == VIEW_SHADOWMAP)
     {
-        glViewport(0, 0, ShadowMap::SIZE, ShadowMap::SIZE);
-        glEnable(GL_DEPTH_TEST);
-        glEnable(GL_CULL_FACE);
+        glBindFramebuffer(GL_FRAMEBUFFER, shadowMap.framebuffer);
+        glClear(GL_DEPTH_BUFFER_BIT);
 
-        glUseProgram(shadowMap.shader.programId);
-        shadowMap.shader.uniformMat4("lightSpaceMatrix", lightSpaceMatrix);
-
-        for(const Model& model: models)
+        if(config.shadows)
         {
-            shadowMap.shader.uniformMat4("model", model.transform);
+            glViewport(0, 0, ShadowMap::SIZE, ShadowMap::SIZE);
+            glEnable(GL_DEPTH_TEST);
+            glEnable(GL_CULL_FACE);
 
-            for(int i = 0; i < model.meshCount; ++i)
+            shadowMap.shader.bind();
+            shadowMap.shader.uniformMat4("lightSpaceMatrix", lightSpaceMatrix);
+
+            for(const Model& model: models)
             {
-                const Mesh& mesh = meshes[model.idxStart + i];
+                shadowMap.shader.uniformMat4("model", model.transform);
 
-                glBindVertexArray(mesh.vao);
-
-                if(mesh.indicesOffset)
+                for(int i = 0; i < model.meshCount; ++i)
                 {
-                    glDrawElements(GL_TRIANGLES, mesh.elementCount, GL_UNSIGNED_INT,
+                    const Mesh& mesh = meshes[model.idxMesh + i];
+                    assert(mesh.indicesOffset);
+                    glBindVertexArray(mesh.vao);
+
+                    glDrawElements(GL_TRIANGLES, mesh.numIndices, GL_UNSIGNED_INT,
                             reinterpret_cast<const void*>(mesh.indicesOffset));
                 }
-                else
-                    glDrawArrays(GL_TRIANGLES, 0, mesh.elementCount);
             }
         }
     }
 
-    // render models to gbuffer
+    // render gbuffer
     glBindFramebuffer(GL_FRAMEBUFFER, gbuffer.framebuffer);
     glViewport(0, 0, frame.bufferSize.x, frame.bufferSize.y);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
 
-    glUseProgram(gbuffer.shader.programId);
+    gbuffer.shader.bind();
 
     gbuffer.shader.uniformMat4("view", camera.view);
-
-    gbuffer.shader.uniformMat4("projection", perspective(45.f, (float)frame.bufferSize.x /
-                frame.bufferSize.y, 0.1f, 100000.f) );
+    gbuffer.shader.uniformMat4("projection", projectionMatrix);
 
     for(const Model& model: models)
     {
@@ -465,142 +456,184 @@ void renderExecuteFrame(const Frame& frame)
 
         for(int i = 0; i < model.meshCount; ++i)
         {
-            const Mesh& mesh = meshes[model.idxStart + i];
-            glBindVertexArray(mesh.vao);
-
+            const Mesh& mesh = meshes[model.idxMesh + i];
             const Material& material = materials[mesh.idxMaterial];
 
-            gbuffer.shader.uniform3f("colorDiffuse", material.colorDiffuse);
+            gbuffer.shader.uniform3f("colorDiffuse", outputView == VIEW_WIREFRAME ? vec3(1.f) : material.colorDiffuse);
             gbuffer.shader.uniform3f("colorSpecular", material.colorSpecular);
 
-            gbuffer.shader.uniform1i("mapDiffuse", material.idxDiffuse);
+            gbuffer.shader.uniform1i("mapDiffuse", material.idxDiffuse && outputView != VIEW_WIREFRAME);
             gbuffer.shader.uniform1i("mapSpecular", material.idxSpecular);
             gbuffer.shader.uniform1i("mapNormal", material.idxNormal && config.normalMaps);
             gbuffer.shader.uniform1i("alphaTest", material.alphaTest);
 
             if(material.idxDiffuse)
             {
-                gbuffer.shader.uniform1i("samplerDiffuse", DIFFUSE);
-
                 if(config.debugUvs)
-                    bindTexture(textures[0], DIFFUSE);
+                    bindTexture(textures[0], UNIT_DIFFUSE);
 
                 else if(config.srgbDiffuseTextures)
-                    bindTexture(textures[material.idxDiffuse_srgb], DIFFUSE);
+                    bindTexture(textures[material.idxDiffuse_srgb], UNIT_DIFFUSE);
+
                 else
-                    bindTexture(textures[material.idxDiffuse], DIFFUSE);
+                    bindTexture(textures[material.idxDiffuse], UNIT_DIFFUSE);
             }
 
             if(material.idxSpecular)
-            {
-                gbuffer.shader.uniform1i("samplerSpecular", SPECULAR);
-                bindTexture(textures[material.idxSpecular], SPECULAR);
-            }
+                bindTexture(textures[material.idxSpecular], UNIT_SPECULAR);
 
             if(material.idxNormal)
-            {
-                gbuffer.shader.uniform1i("samplerNormal", NORMAL);
-                bindTexture(textures[material.idxNormal], NORMAL);
-            }
+                bindTexture(textures[material.idxNormal], UNIT_NORMAL);
 
-            if(mesh.indicesOffset)
-            {
-                glDrawElements(GL_TRIANGLES, mesh.elementCount, GL_UNSIGNED_INT,
-                        reinterpret_cast<const void*>(mesh.indicesOffset));
-            }
-            else
-                glDrawArrays(GL_TRIANGLES, 0, mesh.elementCount);
+            glBindVertexArray(mesh.vao);
+            glDrawElements(outputView == VIEW_WIREFRAME ? GL_LINES : GL_TRIANGLES, mesh.numIndices,
+                           GL_UNSIGNED_INT, reinterpret_cast<const void*>(mesh.indicesOffset));
         }
     }
 
-    // light pass, output to hdr
-    glBindFramebuffer(GL_FRAMEBUFFER, hdr.framebuffer);
-    glViewport(0, 0, frame.bufferSize.x, frame.bufferSize.y);
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);
-
-    glUseProgram(hdr.shaderLightPass.programId);
-
-    hdr.shaderLightPass.uniformMat4("lightSpaceMatrix", lightSpaceMatrix);
-
-    hdr.shaderLightPass.uniform3f("lightDir", normalize(-light.pos));
-    hdr.shaderLightPass.uniform3f("lightColor", materials[meshes[models[light.idxModel].idxStart].idxMaterial].colorDiffuse);
-    hdr.shaderLightPass.uniform3f("cameraPos", camera.pos);
-
-    hdr.shaderLightPass.uniform1i("samplerPosition", POSITION);
-    hdr.shaderLightPass.uniform1i("samplerNormal", NORMAL);
-    hdr.shaderLightPass.uniform1i("samplerDiffuse", DIFFUSE);
-    hdr.shaderLightPass.uniform1i("samplerSpecular", SPECULAR);
-
-    hdr.shaderLightPass.uniform1i("samplerShadowMap", SHADOW_MAP);
-
-    bindTexture(gbuffer.positions, POSITION);
-    bindTexture(gbuffer.normals, NORMAL);
-    bindTexture(gbuffer.colorDiffuse, DIFFUSE);
-    bindTexture(gbuffer.colorSpecular, SPECULAR);
-    bindTexture(shadowMap.depthBuffer, SHADOW_MAP);
-
-    glBindVertexArray(quad.vao);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-
-    // render the hdr image to the default framebuffer;
-    // convert colors from linear to sRGB space
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport(0, 0, frame.bufferSize.x, frame.bufferSize.y);
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);
-
-    glUseProgram(hdr.shaderToneMapping.programId);
-    hdr.shaderToneMapping.uniform1i("sampler", DIFFUSE);
-    hdr.shaderToneMapping.uniform1i("toneMapping", config.toneMapping);
-
-    bindTexture(hdr.texture, DIFFUSE);
-    glBindVertexArray(quad.vao);
-
-    if(config.srgbOutput) glEnable(GL_FRAMEBUFFER_SRGB);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-    glDisable(GL_FRAMEBUFFER_SRGB);
-
-    // render debug shadow map
-    if(config.debugShadowMap)
+    // render light to a hdr texture
+    if(outputView == VIEW_FINAL)
     {
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-        const int size = min( min(frame.bufferSize.x, frame.bufferSize.y),
-                int(ShadowMap::SIZE) );
-        glViewport(0, 0, size, size);
-
+        glBindFramebuffer(GL_FRAMEBUFFER, hdr.framebuffer);
+        glViewport(0, 0, frame.bufferSize.x, frame.bufferSize.y);
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_CULL_FACE);
 
-        glUseProgram(shadowMap.shaderDebug.programId);
-        hdr.shaderToneMapping.uniform1i("sampler", DIFFUSE);
-        bindTexture(shadowMap.depthBuffer, DIFFUSE);
-        glBindVertexArray(quad.vao);
+        hdr.shaderLightPass.bind();
 
-        glEnable(GL_FRAMEBUFFER_SRGB);
+        hdr.shaderLightPass.uniformMat4("lightSpaceMatrix", lightSpaceMatrix);
+        hdr.shaderLightPass.uniform3f("uLightDir", normalize(-light.pos));
+        hdr.shaderLightPass.uniform3f("lightColor", light.color);
+        hdr.shaderLightPass.uniform3f("cameraPos", camera.pos);
+        hdr.shaderLightPass.uniform1i("enableAmbient", config.ambient);
+        hdr.shaderLightPass.uniform1i("enableDiffuse", config.diffuse);
+        hdr.shaderLightPass.uniform1i("enableSpecular", config.specular);
+        hdr.shaderLightPass.uniform1i("blinnPhong", config.blinnPhong);
+
+        bindTexture(gbuffer.positions, UNIT_POSITION);
+        bindTexture(gbuffer.normals, UNIT_NORMAL);
+        bindTexture(gbuffer.colorDiffuse, UNIT_DIFFUSE);
+        bindTexture(gbuffer.colorSpecular, UNIT_SPECULAR);
+        bindTexture(shadowMap.depthBuffer, UNIT_SHADOW_MAP);
+
+        glBindVertexArray(quad.vao);
         glDrawArrays(GL_TRIANGLES, 0, 6);
-        glDisable(GL_FRAMEBUFFER_SRGB);
+
+        // forward rendering; sky and light sources
+        glEnable(GL_DEPTH_TEST);
+
+        shaderPlainColor.bind();
+
+        shaderPlainColor.uniformMat4("view", camera.view);
+        shaderPlainColor.uniformMat4("projection", projectionMatrix);
+
+        const Mesh& mesh = meshes[sphereModel.idxMesh];
+        glBindVertexArray(mesh.vao);
+
+        shaderPlainColor.uniformMat4("model", translate(light.pos) * scale(vec3(light.scale)));
+        shaderPlainColor.uniform3f("color", light.color);
+
+        glEnable(GL_CULL_FACE);
+        glDrawElements(GL_TRIANGLES, mesh.numIndices, GL_UNSIGNED_INT,
+                       reinterpret_cast<const void*>(mesh.indicesOffset));
+
+        shaderPlainColor.uniformMat4("model", scale(vec3(10000)));
+        shaderPlainColor.uniform3f("color", vec3(0.1f, 0.1f, 1.f));
+
+        glDisable(GL_CULL_FACE); // we are rendering the inside of a sphere
+        glDrawElements(GL_TRIANGLES, mesh.numIndices, GL_UNSIGNED_INT,
+                       reinterpret_cast<const void*>(mesh.indicesOffset));
     }
+
+    // render to a default framebuffer
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+
+    if(config.srgbOutput)
+        glEnable(GL_FRAMEBUFFER_SRGB);
+
+    // defaults
+    glViewport(0, 0, frame.bufferSize.x, frame.bufferSize.y);
+    hdr.shaderToneMapping.bind();
+    hdr.shaderToneMapping.uniform1i("toneMapping", false);
+    GLuint texture = textures.front();
+
+    switch(outputView)
+    {
+    case VIEW_DEPTH:
+        shaderDepth.bind();
+        texture = gbuffer.depthBuffer;
+        break;
+
+    case VIEW_POSITIONS:
+        texture = gbuffer.positions;
+        break;
+
+    case VIEW_NORMALS:
+        texture = gbuffer.normals;
+        break;
+
+    case VIEW_TEXTURE_DIFFUSE:
+    case VIEW_WIREFRAME:
+        texture = gbuffer.colorDiffuse;
+        break;
+
+    case VIEW_TEXTURE_SPECULAR:
+        texture = gbuffer.colorSpecular;
+        break;
+
+    case VIEW_SHADOWMAP:
+    {
+        const int size = min( min(frame.bufferSize.x, frame.bufferSize.y), int(ShadowMap::SIZE) );
+        glViewport(0, 0, size, size);
+        shaderDepth.bind();
+        texture = shadowMap.depthBuffer;
+        break;
+    }
+
+    case VIEW_FINAL:
+        hdr.shaderToneMapping.uniform1i("toneMapping", config.toneMapping);
+        texture = hdr.texture;
+        break;
+
+    default: assert(false);
+    }
+
+    bindTexture(texture, UNIT_DEFAULT);
+    glBindVertexArray(quad.vao);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glDisable(GL_FRAMEBUFFER_SRGB);
 
     if(!frame.showGui)
         return;
 
     ImGui::Begin("main");
     camera.imgui();
-    ImGui::Checkbox("ambient", &config.ambient);
-    ImGui::Checkbox("diffuse", &config.diffuse);
-    ImGui::Checkbox("specular", &config.specular);
+    ImGui::Checkbox("ambient  light", &config.ambient);
+    ImGui::Checkbox("diffuse  light", &config.diffuse);
+    ImGui::Checkbox("specular light", &config.specular);
     ImGui::Checkbox("normal maps", &config.normalMaps);
-    ImGui::Checkbox("debug normals", &config.debugNormals);
-    ImGui::Checkbox("debug uvs", &config.debugUvs);
     ImGui::Checkbox("Blinn-Phong specular", &config.blinnPhong);
-    ImGui::Checkbox("tone mapping", &config.toneMapping);
+    ImGui::Checkbox("tone mapping (final image output)", &config.toneMapping);
     ImGui::Checkbox("sRGB diffuse textures", &config.srgbDiffuseTextures);
     ImGui::Checkbox("sRGB output", &config.srgbOutput);
-    ImGui::Checkbox("do lighting", &config.doLighting);
     ImGui::Checkbox("shadows", &config.shadows);
-    ImGui::Checkbox("debug shadow map", &config.debugShadowMap);
+    ImGui::Checkbox("debug UV diffuse texture", &config.debugUvs);
+
+    const char* items[VIEW_COUNT] = {
+        "depth",
+        "world space positions",
+        "world space normals",
+        "diffuse texture",
+        "specular texture",
+        "wireframe",
+        "shadowmap",
+        "final image",
+    };
+
+    ImGui::Spacing();
+    ImGui::Combo("output", &outputView, items, VIEW_COUNT);
     ImGui::End();
 }
 
@@ -719,7 +752,7 @@ static void loadModel(const char* filename, Array<Model>& models, Array<Mesh>& m
     Array<unsigned> indices;
 
     Model model;
-    model.idxStart = meshes.size();
+    model.idxMesh = meshes.size();
 
     for(unsigned idxMesh = 0; idxMesh < scene->mNumMeshes; ++idxMesh)
     {
@@ -789,7 +822,7 @@ static void loadModel(const char* filename, Array<Model>& models, Array<Mesh>& m
         meshes.pushBack({});
         Mesh& mesh = meshes.back();
         ++model.meshCount;
-        mesh.elementCount = indices.size();
+        mesh.numIndices = indices.size();
         mesh.idxMaterial = aimesh.mMaterialIndex + materialOffset;
         
         const GLsizeiptr verticesBytes = sizeof(float) * vertexData.size();
