@@ -196,7 +196,7 @@ int main()
                 ImGui::PushStyleColor(ImGuiCol_FrameBg,color);
 
                 ImGui::PlotLines("", fpsPlot.frameTimes, getSize(fpsPlot.frameTimes), 0,
-                        nullptr, 0.f, 20.f, {FpsPlot::SAMPLE_COUNT, 80});
+                        nullptr, 0.f, 50.f, {FpsPlot::SAMPLE_COUNT, 80});
 
                 ImGui::PopStyleColor(1);
 
