@@ -9,7 +9,7 @@ out vec4 outputColor;
 
 void main()
 {
-    vec4 hdrColor = texture2D(sampler, vTexCoord) ;
+    vec4 hdrColor = texture(sampler, vTexCoord) ;
 
     if(!toneMapping)
     {

@@ -33,7 +33,7 @@ float calcShadow(vec3 lightSpacePosition)
     {
         for(int y = -1; y <= 1; ++y)
         {
-            float closestDepth = texture2D(samplerShadowMap, posWindowSpace.xy +
+            float closestDepth = texture(samplerShadowMap, posWindowSpace.xy +
                 vec2(x, y) * texelSize).r;
 
             shadow += fragDepth > closestDepth + bias ? 1.0 : 0.0;
@@ -45,10 +45,10 @@ float calcShadow(vec3 lightSpacePosition)
 
 void main()
 {
-    vec3 diffuseSample = texture2D(samplerDiffuse, vTexCoord).rgb;
-    vec3 specularSample = texture2D(samplerSpecular, vTexCoord).rgb;
-    vec3 normal = texture2D(samplerNormal, vTexCoord).rgb;
-    vec3 position = texture2D(samplerPosition, vTexCoord).rgb;
+    vec3 diffuseSample = texture(samplerDiffuse, vTexCoord).rgb;
+    vec3 specularSample = texture(samplerSpecular, vTexCoord).rgb;
+    vec3 normal = texture(samplerNormal, vTexCoord).rgb;
+    vec3 position = texture(samplerPosition, vTexCoord).rgb;
     vec3 lightDir = normalize(uLightDir); // just to be sure
 
 

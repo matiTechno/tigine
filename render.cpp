@@ -265,6 +265,9 @@ void renderExecuteFrame(const Frame& frame)
 
             glGenTextures(1, &gbuffer.depthBuffer);
             glBindTexture(GL_TEXTURE_2D, gbuffer.depthBuffer);
+            // to enable preview
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 
             glGenTextures(1, &gbuffer.positions);
             glBindTexture(GL_TEXTURE_2D, gbuffer.positions);
@@ -391,6 +394,16 @@ void renderExecuteFrame(const Frame& frame)
         }
     }
 
+    struct
+    {
+        const float near = 0.1f;
+        const float far = 20000.f;
+        mat4 matrix;
+    } projection;
+
+    projection.matrix = perspective(45.f, (float)frame.bufferSize.x / frame.bufferSize.y,
+                                    projection.near, projection.far);
+
     mat4 lightSpaceMatrix;
     {
         // this is hardcoded for sponza...
@@ -402,9 +415,6 @@ void renderExecuteFrame(const Frame& frame)
         lightSpaceMatrix = orthographic(-size, size, -size, size, 0.01f, size * 1.5f) *
             lookAt(normalize(lpos) * size, vec3(0.f), vec3(0.f, 1.f, 0.f));
     }
-
-    const mat4 projectionMatrix = perspective(45.f, (float)frame.bufferSize.x /
-                                              frame.bufferSize.y, 0.1f, 20000.f);
 
     // render shadow map
     if(outputView == VIEW_FINAL || outputView == VIEW_SHADOWMAP)
@@ -448,7 +458,7 @@ void renderExecuteFrame(const Frame& frame)
     gbuffer.shader.bind();
 
     gbuffer.shader.uniformMat4("view", camera.view);
-    gbuffer.shader.uniformMat4("projection", projectionMatrix);
+    gbuffer.shader.uniformMat4("projection", projection.matrix);
 
     for(const Model& model: models)
     {
@@ -525,7 +535,7 @@ void renderExecuteFrame(const Frame& frame)
         shaderPlainColor.bind();
 
         shaderPlainColor.uniformMat4("view", camera.view);
-        shaderPlainColor.uniformMat4("projection", projectionMatrix);
+        shaderPlainColor.uniformMat4("projection", projection.matrix);
 
         const Mesh& mesh = meshes[sphereModel.idxMesh];
         glBindVertexArray(mesh.vao);
@@ -563,6 +573,9 @@ void renderExecuteFrame(const Frame& frame)
     {
     case VIEW_DEPTH:
         shaderDepth.bind();
+        shaderDepth.uniform1i("linearize", true);
+        shaderDepth.uniform1f("near", projection.near);
+        shaderDepth.uniform1f("far", projection.far);
         texture = gbuffer.depthBuffer;
         break;
 
@@ -588,6 +601,7 @@ void renderExecuteFrame(const Frame& frame)
         const int size = min( min(frame.bufferSize.x, frame.bufferSize.y), int(ShadowMap::SIZE) );
         glViewport(0, 0, size, size);
         shaderDepth.bind();
+        shaderDepth.uniform1i("linearize", false);
         texture = shadowMap.depthBuffer;
         break;
     }

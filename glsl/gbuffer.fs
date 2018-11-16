@@ -26,7 +26,7 @@ void main()
 {
     outputPosition = vFragPos;
 
-    vec4 diffuseSample = texture2D(samplerDiffuse, vTexCoord).rgba;
+    vec4 diffuseSample = texture(samplerDiffuse, vTexCoord).rgba;
 
     if(alphaTest)
     {
@@ -42,13 +42,13 @@ void main()
     outputSpecular = colorSpecular;
 
     if(mapSpecular)
-        outputSpecular *= texture2D(samplerSpecular, vTexCoord).rgb;
+        outputSpecular *= texture(samplerSpecular, vTexCoord).rgb;
 
     outputNormal = normalize(vTBN[2]);
 
     if(mapNormal)
     {
-        vec3 sample = texture2D(samplerNormal, vTexCoord).rgb;
+        vec3 sample = texture(samplerNormal, vTexCoord).rgb;
         vec3 tangentNormal = normalize(sample * 2.0 - 1.0);
         outputNormal = normalize(vTBN * tangentNormal);
     }
