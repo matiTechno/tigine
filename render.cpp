@@ -647,7 +647,8 @@ void renderExecuteFrame(const Frame& frame)
     };
 
     ImGui::Spacing();
-    ImGui::Combo("output", &outputView, items, VIEW_COUNT);
+    // without + 1 imgui adds unnecessary scrollbar
+    ImGui::ListBox("output", &outputView, items, VIEW_COUNT, VIEW_COUNT + 1);
     ImGui::End();
 }
 
