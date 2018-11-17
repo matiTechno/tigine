@@ -4,8 +4,8 @@ in vec2 vTexCoord;
 
 out vec4 outputColor;
 
-uniform vec3 uLightDir;
-uniform vec3 lightColor;
+uniform vec3 light_dir;
+uniform vec3 light_color;
 uniform vec3 cameraPos;
 uniform mat4 lightSpaceMatrix;
 
@@ -43,40 +43,46 @@ float calcShadow(vec3 lightSpacePosition)
     return shadow / 9.0;
 }
 
+// conventions from 'Real-Time Rendering'
+
+// E          light irradiance perpendicular to surface normal
+// E_l        light irradiance perpendicular to light direction
+// L          light radiance (irradiance coming from one direction)
+// M          surface outgoing irradiance (exitance)
+// L_o        surface outgoing radiance
+// view_dir   direction from sample to sensor
+// light_dir  direction from sample to light
+
 void main()
 {
-    vec3 diffuseSample = texture(samplerDiffuse, vTexCoord).rgb;
-    vec3 specularSample = texture(samplerSpecular, vTexCoord).rgb;
+    vec3 color_diffuse = texture(samplerDiffuse, vTexCoord).rgb;
+    vec3 color_specular = texture(samplerSpecular, vTexCoord).rgb;
     vec3 normal = texture(samplerNormal, vTexCoord).rgb;
     vec3 position = texture(samplerPosition, vTexCoord).rgb;
-    vec3 lightDir = normalize(uLightDir); // just to be sure
+    vec3 E_l = light_color;
+    vec3 E = E_l * max(0.0, dot(light_dir, normal));
 
+    vec3 L_ambient = color_diffuse * E_l * 0.01;
+    vec3 L_diffuse = color_diffuse * E;
 
-    vec3 ambient = diffuseSample * lightColor * 0.01;
-
-    vec3 diffuse = diffuseSample * lightColor * max(0.0, dot(-lightDir, normal));
-
-    vec3 specular = specularSample;
-    vec3 viewDir = normalize(position - cameraPos);
-    const float specularExponent = 10.0;
-
-    if(blinnPhong)
+    vec3 L_specular;
     {
-        vec3 h = normalize(-lightDir + -viewDir);
-        specular *= pow( max( dot(h, normal), 0.0 ), specularExponent );
-    }
-    else
-    {
+        vec3 M_specular = color_specular * E;
 
-        vec3 reflectDir = reflect(lightDir, normal);
-        specular *= pow( max( dot(-viewDir, reflectDir), 0.0 ), specularExponent );
+        vec3 view_dir = normalize(cameraPos - position);
+
+        vec3 h = normalize(light_dir + view_dir);
+
+        float m = 10.0; // surface smoothness parameter
+
+        L_specular = M_specular * pow( max(0.0, dot(h, normal)), m );
     }
 
     float shadow = calcShadow( (lightSpaceMatrix * vec4(position, 1.0)).xyz );
 
     outputColor = vec4(
-        enableAmbient  * ambient +
-        enableDiffuse  * (1.0 - shadow) * diffuse +
-        enableSpecular * (1.0 - shadow) * specular,
+        enableAmbient  * L_ambient +
+        enableDiffuse  * (1.0 - shadow) * L_diffuse +
+        enableSpecular * (1.0 - shadow) * L_specular,
         1.0);
 }

@@ -45,8 +45,8 @@ enum
     VIEW_DEPTH,
     VIEW_POSITIONS,
     VIEW_NORMALS,
-    VIEW_TEXTURE_DIFFUSE,
-    VIEW_TEXTURE_SPECULAR,
+    VIEW_COLOR_DIFFUSE,
+    VIEW_COLOR_SPECULAR,
     VIEW_WIREFRAME,
     VIEW_SHADOWMAP,
     VIEW_FINAL,
@@ -116,7 +116,6 @@ void renderExecuteFrame(const Frame& frame)
         bool diffuse = true;
         bool specular = true;
         bool normalMaps = true;
-        bool blinnPhong = true;
         bool toneMapping = true;
         bool srgbDiffuseTextures = true;
         bool srgbOutput = true;
@@ -126,7 +125,7 @@ void renderExecuteFrame(const Frame& frame)
 
     struct
     {
-        vec3 pos = vec3(0.6f, 2.f, -0.3f) * 3000.f; // direction == normalize(-pos)
+        vec3 pos = vec3(0.6f, 2.f, -0.3f) * 3000.f; // light_dir == normalize(pos)
         int idxModel;
         float scale = 100.f;
         vec3 color = vec3(5.f);
@@ -512,13 +511,12 @@ void renderExecuteFrame(const Frame& frame)
         hdr.shaderLightPass.bind();
 
         hdr.shaderLightPass.uniformMat4("lightSpaceMatrix", lightSpaceMatrix);
-        hdr.shaderLightPass.uniform3f("uLightDir", normalize(-light.pos));
-        hdr.shaderLightPass.uniform3f("lightColor", light.color);
+        hdr.shaderLightPass.uniform3f("light_dir", normalize(light.pos));
+        hdr.shaderLightPass.uniform3f("light_color", light.color);
         hdr.shaderLightPass.uniform3f("cameraPos", camera.pos);
         hdr.shaderLightPass.uniform1i("enableAmbient", config.ambient);
         hdr.shaderLightPass.uniform1i("enableDiffuse", config.diffuse);
         hdr.shaderLightPass.uniform1i("enableSpecular", config.specular);
-        hdr.shaderLightPass.uniform1i("blinnPhong", config.blinnPhong);
 
         bindTexture(gbuffer.positions, UNIT_POSITION);
         bindTexture(gbuffer.normals, UNIT_NORMAL);
@@ -587,12 +585,12 @@ void renderExecuteFrame(const Frame& frame)
         texture = gbuffer.normals;
         break;
 
-    case VIEW_TEXTURE_DIFFUSE:
+    case VIEW_COLOR_DIFFUSE:
     case VIEW_WIREFRAME:
         texture = gbuffer.colorDiffuse;
         break;
 
-    case VIEW_TEXTURE_SPECULAR:
+    case VIEW_COLOR_SPECULAR:
         texture = gbuffer.colorSpecular;
         break;
 
@@ -628,7 +626,6 @@ void renderExecuteFrame(const Frame& frame)
     ImGui::Checkbox("diffuse  light", &config.diffuse);
     ImGui::Checkbox("specular light", &config.specular);
     ImGui::Checkbox("normal maps", &config.normalMaps);
-    ImGui::Checkbox("Blinn-Phong specular", &config.blinnPhong);
     ImGui::Checkbox("tone mapping (final image output)", &config.toneMapping);
     ImGui::Checkbox("sRGB diffuse textures", &config.srgbDiffuseTextures);
     ImGui::Checkbox("sRGB output", &config.srgbOutput);
@@ -639,8 +636,8 @@ void renderExecuteFrame(const Frame& frame)
         "depth",
         "world space positions",
         "world space normals",
-        "diffuse texture",
-        "specular texture",
+        "diffuse color",
+        "specular color",
         "wireframe",
         "shadowmap",
         "final image",

@@ -91,7 +91,7 @@ int main()
 
     struct FpsPlot
     {
-        enum {SAMPLE_COUNT = 1000};
+        enum {SAMPLE_COUNT = 400};
         float frameTimes[SAMPLE_COUNT] = {}; // ms
     } fpsPlot; 
     double time = glfwGetTime();

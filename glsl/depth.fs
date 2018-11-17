@@ -24,8 +24,8 @@ void main()
     float ndcDepth = windowSpaceDepth * 2.0 - 1.0;
 
     // [-near, -far]
-    // -far is always less than -near but ndc is a right-handed coordinate system so the order
-    // is reversed here
+    // -far is always less than -near but eye (or view) space is a right-handed coordinate system so the order
+    // is reversed here (ndc is left-handed)
 
     float eyeSpaceDepth = (2.0 * far * near) / (ndcDepth * (far - near) - (far + near));
 
