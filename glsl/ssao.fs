@@ -60,5 +60,5 @@ void main()
         occlusion += (samplePos.z < depth ? 1.0 : 0.0) * inRange;
     }
 
-    color = 1.0 - occlusion / SAMPLES_SIZE;
+    color = pow(1.0 - occlusion / SAMPLES_SIZE, 2.0);
 }

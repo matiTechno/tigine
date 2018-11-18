@@ -181,8 +181,15 @@ void renderExecuteFrame(const Frame& frame)
         GLuint texture;
         GLuint framebuffer;
         GLuint textureNoise;
-        float radius = 20.f;
+        float radius = 25.f;
     } static ssao;
+
+    struct
+    {
+        Shader shader;
+        GLuint framebuffer;
+        GLuint texture;
+    } static ssaoBlur;
 
     static bool init = true;
     if(init)
@@ -431,6 +438,26 @@ void renderExecuteFrame(const Frame& frame)
 
             ssao.shader.uniform1i("noiseTextureSize", size);
         }
+
+        // ssao blur
+        {
+            ssaoBlur.shader = createShader("glsl/quad.vs", "glsl/ssao-blur.fs");
+            ssaoBlur.shader.bind();
+            ssaoBlur.shader.uniform1i("samplerSsao", UNIT_SSAO);
+
+            glGenTextures(1, &ssaoBlur.texture);
+            glBindTexture(GL_TEXTURE_2D, ssaoBlur.texture);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+
+            glGenFramebuffers(1, &ssaoBlur.framebuffer);
+            glBindFramebuffer(GL_FRAMEBUFFER, ssaoBlur.framebuffer);
+            glDrawBuffer(GL_COLOR_ATTACHMENT0);
+            glReadBuffer(GL_NONE);
+
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                    GL_TEXTURE_2D, ssaoBlur.texture, 0);
+        }
     }
 
     if(frame.quit)
@@ -480,6 +507,12 @@ void renderExecuteFrame(const Frame& frame)
         // ssao
         {
             glBindTexture(GL_TEXTURE_2D, ssao.texture);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, size.x, size.y, 0, GL_RED, GL_UNSIGNED_BYTE,
+                    nullptr);
+        }
+        // ssao blur
+        {
+            glBindTexture(GL_TEXTURE_2D, ssaoBlur.texture);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, size.x, size.y, 0, GL_RED, GL_UNSIGNED_BYTE,
                     nullptr);
         }
@@ -593,10 +626,9 @@ void renderExecuteFrame(const Frame& frame)
     }
 
     // render ssao
-    glBindFramebuffer(GL_FRAMEBUFFER, ssao.framebuffer);
-
     if(config.ssao)
     {
+        glBindFramebuffer(GL_FRAMEBUFFER, ssao.framebuffer);
         glViewport(0, 0, frame.bufferSize.x, frame.bufferSize.y);
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_CULL_FACE);
@@ -609,9 +641,16 @@ void renderExecuteFrame(const Frame& frame)
         bindTexture(ssao.textureNoise, UNIT_SSAO_NOISE);
         glBindVertexArray(quad.vao);
         glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, ssaoBlur.framebuffer);
+        ssaoBlur.shader.bind();
+        bindTexture(ssao.texture, UNIT_SSAO);
+        glBindVertexArray(quad.vao);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
     }
     else
     {
+        glBindFramebuffer(GL_FRAMEBUFFER, ssaoBlur.framebuffer);
         glClearColor(1.f, 1.f, 1.f, 1.f);
         glClear(GL_COLOR_BUFFER_BIT);
         glClearColor(0.f, 0.f, 0.f, 0.f);
@@ -640,7 +679,7 @@ void renderExecuteFrame(const Frame& frame)
         bindTexture(gbuffer.colorDiffuse, UNIT_DIFFUSE);
         bindTexture(gbuffer.colorSpecular, UNIT_SPECULAR);
         bindTexture(shadowMap.depthBuffer, UNIT_SHADOW_MAP);
-        bindTexture(ssao.texture, UNIT_SSAO);
+        bindTexture(ssaoBlur.texture, UNIT_SSAO);
 
         glBindVertexArray(quad.vao);
         glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -725,7 +764,7 @@ void renderExecuteFrame(const Frame& frame)
     case VIEW_SSAO:
         shaderDepth.bind();
         shaderDepth.uniform1i("linearize", false);
-        texture = ssao.texture;
+        texture = ssaoBlur.texture;
         break;
 
     case VIEW_FINAL:
