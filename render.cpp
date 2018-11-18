@@ -8,10 +8,17 @@
 #include "Shader.hpp"
 
 #include <assert.h>
+#include <stdlib.h>
+#include <time.h>
 
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
+
+static float randomFloat()
+{
+    return rand() / float(RAND_MAX);
+}
 
 struct Mesh
 {
@@ -37,7 +44,9 @@ enum
     UNIT_NORMAL,
     UNIT_ALPHA,
     UNIT_SHADOW_MAP,
-    UNIT_POSITION
+    UNIT_POSITION,
+    UNIT_SSAO,
+    UNIT_SSAO_NOISE
 };
 
 enum
@@ -49,6 +58,7 @@ enum
     VIEW_COLOR_SPECULAR,
     VIEW_WIREFRAME,
     VIEW_SHADOWMAP,
+    VIEW_SSAO,
     VIEW_FINAL,
     VIEW_COUNT
 };
@@ -120,6 +130,7 @@ void renderExecuteFrame(const Frame& frame)
         bool srgbDiffuseTextures = true;
         bool srgbOutput = true;
         bool shadows = true;
+        bool ssao = true;
         bool debugUvs = false;
     } static config;
 
@@ -163,6 +174,15 @@ void renderExecuteFrame(const Frame& frame)
         GLuint framebuffer;
         GLuint texture;
     } static hdr;
+
+    struct
+    {
+        Shader shader;
+        GLuint texture;
+        GLuint framebuffer;
+        GLuint textureNoise;
+        float radius = 20.f;
+    } static ssao;
 
     static bool init = true;
     if(init)
@@ -248,7 +268,7 @@ void renderExecuteFrame(const Frame& frame)
             glGenFramebuffers(1, &shadowMap.framebuffer);
             glBindFramebuffer(GL_FRAMEBUFFER, shadowMap.framebuffer);
             glDrawBuffer(GL_NONE);
-            glReadBuffer(GL_NONE);
+            glReadBuffer(GL_NONE); // just to be sure...
 
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D,
                     shadowMap.depthBuffer, 0);
@@ -294,7 +314,7 @@ void renderExecuteFrame(const Frame& frame)
             GLenum bufs[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
 
             glDrawBuffers(getSize(bufs), bufs);
-            glReadBuffer(GL_NONE); // just to be sure...
+            glReadBuffer(GL_NONE);
 
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                     GL_TEXTURE_2D, gbuffer.depthBuffer, 0);
@@ -325,6 +345,7 @@ void renderExecuteFrame(const Frame& frame)
             hdr.shaderLightPass.uniform1i("samplerDiffuse", UNIT_DIFFUSE);
             hdr.shaderLightPass.uniform1i("samplerSpecular", UNIT_SPECULAR);
             hdr.shaderLightPass.uniform1i("samplerShadowMap", UNIT_SHADOW_MAP);
+            hdr.shaderLightPass.uniform1i("samplerSsao", UNIT_SSAO);
 
             glGenTextures(1, &hdr.texture);
             glBindTexture(GL_TEXTURE_2D, hdr.texture);
@@ -333,9 +354,8 @@ void renderExecuteFrame(const Frame& frame)
 
             glGenFramebuffers(1, &hdr.framebuffer);
             glBindFramebuffer(GL_FRAMEBUFFER, hdr.framebuffer);
-            GLenum buf = GL_COLOR_ATTACHMENT0;
-            glDrawBuffers(1, &buf);
-            glReadBuffer(GL_NONE); // just to be sure...
+            glDrawBuffer(GL_COLOR_ATTACHMENT0);
+            glReadBuffer(GL_NONE);
 
             // needed for forward rendering pass;
             // reuse the depth buffer from gbuffer
@@ -344,6 +364,72 @@ void renderExecuteFrame(const Frame& frame)
 
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                     GL_TEXTURE_2D, hdr.texture, 0);
+        }
+
+        // ssao
+        {
+            glGenTextures(1, &ssao.texture);
+            glBindTexture(GL_TEXTURE_2D, ssao.texture);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+
+            glGenFramebuffers(1, &ssao.framebuffer);
+            glBindFramebuffer(GL_FRAMEBUFFER, ssao.framebuffer);
+            glDrawBuffer(GL_COLOR_ATTACHMENT0);
+            glReadBuffer(GL_NONE);
+
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                    GL_TEXTURE_2D, ssao.texture, 0);
+
+            // todo: way to define constants in a shader, in this case number of samples
+            vec3 samples[24];
+
+            srand(time(nullptr));
+
+            for(int i = 0; i < getSize(samples);)
+            {
+                vec3& sample = samples[i];
+
+                sample.x = randomFloat() * 2.f - 1.f;
+                sample.y = randomFloat() * 2.f - 1.f;
+                sample.z = randomFloat();
+
+                if(length(sample) > 1.f)
+                    continue;
+
+                float scale = float(i) / getSize(samples);
+                scale = lerp(0.1f, 1.f, scale * scale);
+                sample *= scale;
+                ++i;
+            }
+
+            ssao.shader = createShader("glsl/quad.vs", "glsl/ssao.fs");
+            ssao.shader.bind();
+            ssao.shader.uniform3fv("samples", getSize(samples), samples);
+            ssao.shader.uniform1i("samplerPosition", UNIT_POSITION);
+            ssao.shader.uniform1i("samplerNormal", UNIT_NORMAL);
+            ssao.shader.uniform1i("samplerNoise", UNIT_SSAO_NOISE);
+
+            glGenTextures(1, &ssao.textureNoise);
+            glBindTexture(GL_TEXTURE_2D, ssao.textureNoise);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+
+            constexpr int size = 4;
+            vec3 noise[size * size];
+
+            for(vec3& v: noise)
+            {
+                v.x = randomFloat() * 2.f - 1.f;
+                v.y = randomFloat() * 2.f - 1.f;
+                v.z = 0.f;
+            }
+
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, size, size, 0, GL_RGB, GL_FLOAT, noise);
+
+            ssao.shader.uniform1i("noiseTextureSize", size);
         }
     }
 
@@ -389,6 +475,12 @@ void renderExecuteFrame(const Frame& frame)
         {
             glBindTexture(GL_TEXTURE_2D, hdr.texture);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, size.x, size.y, 0, GL_RGB, GL_FLOAT,
+                    nullptr);
+        }
+        // ssao
+        {
+            glBindTexture(GL_TEXTURE_2D, ssao.texture);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, size.x, size.y, 0, GL_RED, GL_UNSIGNED_BYTE,
                     nullptr);
         }
     }
@@ -500,6 +592,31 @@ void renderExecuteFrame(const Frame& frame)
         }
     }
 
+    // render ssao
+    glBindFramebuffer(GL_FRAMEBUFFER, ssao.framebuffer);
+
+    if(config.ssao)
+    {
+        glViewport(0, 0, frame.bufferSize.x, frame.bufferSize.y);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        ssao.shader.bind();
+        ssao.shader.uniformMat4("view", camera.view);
+        ssao.shader.uniformMat4("projection", projection.matrix);
+        ssao.shader.uniform1f("radius", ssao.radius);
+        bindTexture(gbuffer.positions, UNIT_POSITION);
+        bindTexture(gbuffer.normals, UNIT_NORMAL);
+        bindTexture(ssao.textureNoise, UNIT_SSAO_NOISE);
+        glBindVertexArray(quad.vao);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
+    else
+    {
+        glClearColor(1.f, 1.f, 1.f, 1.f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glClearColor(0.f, 0.f, 0.f, 0.f);
+    }
+
     // render light to a hdr texture
     if(outputView == VIEW_FINAL)
     {
@@ -523,6 +640,7 @@ void renderExecuteFrame(const Frame& frame)
         bindTexture(gbuffer.colorDiffuse, UNIT_DIFFUSE);
         bindTexture(gbuffer.colorSpecular, UNIT_SPECULAR);
         bindTexture(shadowMap.depthBuffer, UNIT_SHADOW_MAP);
+        bindTexture(ssao.texture, UNIT_SSAO);
 
         glBindVertexArray(quad.vao);
         glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -604,6 +722,12 @@ void renderExecuteFrame(const Frame& frame)
         break;
     }
 
+    case VIEW_SSAO:
+        shaderDepth.bind();
+        shaderDepth.uniform1i("linearize", false);
+        texture = ssao.texture;
+        break;
+
     case VIEW_FINAL:
         hdr.shaderToneMapping.uniform1i("toneMapping", config.toneMapping);
         texture = hdr.texture;
@@ -630,7 +754,9 @@ void renderExecuteFrame(const Frame& frame)
     ImGui::Checkbox("sRGB diffuse textures", &config.srgbDiffuseTextures);
     ImGui::Checkbox("sRGB output", &config.srgbOutput);
     ImGui::Checkbox("shadows", &config.shadows);
+    ImGui::Checkbox("ssao", &config.ssao);
     ImGui::Checkbox("debug UV diffuse texture", &config.debugUvs);
+    ImGui::SliderFloat("ssao radius", &ssao.radius, 0.f, 50.f);
 
     const char* items[VIEW_COUNT] = {
         "depth",
@@ -640,6 +766,7 @@ void renderExecuteFrame(const Frame& frame)
         "specular color",
         "wireframe",
         "shadowmap",
+        "ssao",
         "final image",
     };
 

@@ -13,13 +13,12 @@ uniform sampler2D samplerPosition;
 uniform sampler2D samplerNormal;
 uniform sampler2D samplerDiffuse;
 uniform sampler2D samplerSpecular;
+uniform sampler2D samplerShadowMap;
+uniform sampler2D samplerSsao;
 
 uniform int enableAmbient;
 uniform int enableDiffuse;
 uniform int enableSpecular;
-uniform bool blinnPhong;
-
-uniform sampler2D samplerShadowMap;
 
 float calcShadow(vec3 lightSpacePosition)
 {
@@ -62,10 +61,11 @@ void main()
     vec3 E_l = light_color;
     vec3 E = E_l * max(0.0, dot(light_dir, normal));
 
-    vec3 L_ambient = color_diffuse * E_l * 0.01;
-    vec3 L_diffuse = color_diffuse * E;
+    vec3 L_o_ambient = color_diffuse * E_l * 0.01 * texture(samplerSsao, vTexCoord).r;
 
-    vec3 L_specular;
+    vec3 L_o_diffuse = color_diffuse * E;
+
+    vec3 L_o_specular;
     {
         vec3 M_specular = color_specular * E;
 
@@ -75,14 +75,14 @@ void main()
 
         float m = 10.0; // surface smoothness parameter
 
-        L_specular = M_specular * pow( max(0.0, dot(h, normal)), m );
+        L_o_specular = M_specular * pow( max(0.0, dot(h, normal)), m );
     }
 
     float shadow = calcShadow( (lightSpaceMatrix * vec4(position, 1.0)).xyz );
 
     outputColor = vec4(
-        enableAmbient  * L_ambient +
-        enableDiffuse  * (1.0 - shadow) * L_diffuse +
-        enableSpecular * (1.0 - shadow) * L_specular,
+        enableAmbient  * L_o_ambient +
+        enableDiffuse  * (1.0 - shadow) * L_o_diffuse +
+        enableSpecular * (1.0 - shadow) * L_o_specular,
         1.0);
 }

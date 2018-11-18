@@ -192,6 +192,11 @@ inline vec3 cross(vec3 v, vec3 w)
     };
 }
 
+inline float lerp(float x, float y, float a)
+{
+    return x + (y - x) * a;
+}
+
 inline float length(vec2 v)
 {
     return sqrtf(v.x * v.x + v.y * v.y);

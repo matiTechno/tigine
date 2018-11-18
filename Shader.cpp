@@ -1,6 +1,5 @@
 #include "Shader.hpp"
 #include "Array.hpp"
-#include "api.hpp"
 
 #include <string.h>
 #include <stdio.h>
