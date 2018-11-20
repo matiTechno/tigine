@@ -81,10 +81,10 @@ void Camera3d::update(const float dt)
 {
     up = normalize(up);
 
-    const vec3 dir = normalize(vec3(
-                cosf(toRadians(pitch)) * sinf(toRadians(yaw)) * -1.f,
-                sinf(toRadians(pitch)),
-                cosf(toRadians(pitch)) * cosf(toRadians(yaw)) * -1.f));
+    dir = normalize(vec3(
+                        cosf(toRadians(pitch)) * sinf(toRadians(yaw)) * -1.f,
+                        sinf(toRadians(pitch)),
+                        cosf(toRadians(pitch)) * cosf(toRadians(yaw)) * -1.f));
     
     vec3 moveDir(0.f);
 

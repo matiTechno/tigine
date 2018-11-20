@@ -412,3 +412,101 @@ inline mat4 rotateX(float angle)
     m.k.z = cos;
     return m;
 }
+
+struct Plane
+{
+    vec3 position;
+    vec3 normal;
+};
+
+enum
+{
+    PLANE_TOP,
+    PLANE_BOTTOM,
+    PLANE_LEFT,
+    PLANE_RIGHT,
+    PLANE_NEAR,
+    PLANE_FAR,
+    PLANE_COUNT
+};
+
+struct Frustum
+{
+    Plane planes[PLANE_COUNT];
+};
+
+// up and cameraDir must be normalized
+// fovy is in degrees
+// this should not be inlined...
+inline Frustum createFrustum(vec3 cameraPos, vec3 up, vec3 cameraDir,
+                             float fovy, float aspect, float near, float far)
+{
+    assert(near > 0.f);
+    assert(near < far);
+
+    Frustum frustum;
+
+    vec3 x_axis = cross(cameraDir, up);
+    vec3 y_axis = cross(x_axis, cameraDir);
+
+    vec3 nearPlaneCenter = cameraPos + cameraDir * near;
+    vec3 farPlaneCenter = cameraPos + cameraDir * far;
+
+    frustum.planes[PLANE_NEAR] = {nearPlaneCenter, cameraDir};
+    frustum.planes[PLANE_FAR] = {farPlaneCenter, -cameraDir};
+
+    fovy = toRadians(fovy);
+    float top = tanf(fovy) * near;
+    float right = aspect * top;
+
+    {
+        vec3 parallel = normalize( (nearPlaneCenter + top * y_axis) - cameraPos);
+        vec3 normal = cross(parallel, x_axis);
+        frustum.planes[PLANE_TOP] = {cameraPos, normal};
+    }
+    {
+        vec3 parallel = normalize( (nearPlaneCenter - top * y_axis) - cameraPos);
+        vec3 normal = cross(x_axis, parallel);
+        frustum.planes[PLANE_BOTTOM] = {cameraPos, normal};
+    }
+    {
+        vec3 parallel = normalize( (nearPlaneCenter + right * x_axis) - cameraPos);
+        vec3 normal = cross(y_axis, parallel);
+        frustum.planes[PLANE_RIGHT] = {cameraPos, normal};
+    }
+    {
+        vec3 parallel = normalize( (nearPlaneCenter - right * x_axis) - cameraPos);
+        vec3 normal = cross(parallel, y_axis);
+        frustum.planes[PLANE_LEFT] = {cameraPos, normal};
+    }
+
+    return frustum;
+}
+
+struct BoundingBox
+{
+    vec3 vertices[8];
+};
+
+inline bool cull(const Frustum& frustum, const BoundingBox& bbox, const mat4& transform)
+{
+    for(const Plane& plane: frustum.planes)
+    {
+        bool in = false;
+        for(vec3 p: bbox.vertices)
+        {
+            p = vec3(transform * vec4(p, 1.f));
+
+            if(dot(plane.normal, p - plane.position) > 0.f)
+            {
+                in = true;
+                break;
+            }
+        }
+
+        if(!in)
+            return true;
+    }
+
+    return false;
+}

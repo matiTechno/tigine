@@ -22,6 +22,7 @@ static float randomFloat()
 
 struct Mesh
 {
+    BoundingBox bbox;
     GLuint vao;
     GLuint bo;
     int numIndices;
@@ -61,6 +62,13 @@ enum
     VIEW_SSAO,
     VIEW_FINAL,
     VIEW_COUNT
+};
+
+enum
+{
+    DEBUG_CAMERA_OFF,
+    DEBUG_CAMERA,
+    DEBUG_CAMERA_WITH_CONTROL
 };
 
 struct Material
@@ -109,12 +117,14 @@ static int addTexture(const char* filename, Array<GLuint>& textures,
 void renderExecuteFrame(const Frame& frame)
 {
     static Model sphereModel;
+    static Model cameraModel;
     static Array<Model> models;
     static Array<Mesh> meshes;
     static Array<Material> materials;
     static Array<GLuint> textures;
     static Array<TexId> texIds;
     static Camera3d camera;
+    static Camera3d cameraDebug;
     static Shader shaderPlainColor;
     static Shader shaderDepth;
     static ivec2 prevFramebufferSize = ivec2(-1);
@@ -132,6 +142,8 @@ void renderExecuteFrame(const Frame& frame)
         bool shadows = true;
         bool ssao = true;
         bool debugUvs = false;
+        bool frustumCulling = true;
+        int debugCamera = DEBUG_CAMERA_OFF;
     } static config;
 
     struct
@@ -220,6 +232,10 @@ void renderExecuteFrame(const Frame& frame)
 
         // hack
         sphereModel = models.front();
+        models.popBack();
+
+        loadModel("data/camera.obj", models, meshes, materials, textures, texIds);
+        cameraModel = models.front();
         models.popBack();
 
         loadModel("data/sponza/sponza.obj", models, meshes, materials, textures, texIds);
@@ -467,9 +483,15 @@ void renderExecuteFrame(const Frame& frame)
     }
 
     for(const WinEvent& e: frame.winEvents)
-        camera.processEvent(e);
+    {
+        if(config.debugCamera == DEBUG_CAMERA_WITH_CONTROL)
+            cameraDebug.processEvent(e);
+        else
+            camera.processEvent(e);
+    }
 
     camera.update(frame.dt);
+    cameraDebug.update(frame.dt);
 
     if(prevFramebufferSize != frame.bufferSize)
     {
@@ -520,13 +542,21 @@ void renderExecuteFrame(const Frame& frame)
 
     struct
     {
+        const float fovy = 45.f;
+        float aspect;
         const float near = 0.1f;
         const float far = 20000.f;
+
         mat4 matrix;
     } projection;
 
-    projection.matrix = perspective(45.f, (float)frame.bufferSize.x / frame.bufferSize.y,
-                                    projection.near, projection.far);
+    projection.aspect = (float)frame.bufferSize.x / frame.bufferSize.y;
+    projection.matrix = perspective(projection.fovy, projection.aspect, projection.near, projection.far);
+
+    const Frustum frustum = createFrustum(camera.pos, camera.up, camera.dir,
+                                          projection.fovy, projection.aspect, projection.near, projection.far);
+
+    const Camera3d& activeCamera = config.debugCamera ? cameraDebug : camera;
 
     mat4 lightSpaceMatrix;
     {
@@ -572,6 +602,9 @@ void renderExecuteFrame(const Frame& frame)
         }
     }
 
+    int numMesh = 0;
+    int maxMesh = 0;
+
     // render gbuffer
     glBindFramebuffer(GL_FRAMEBUFFER, gbuffer.framebuffer);
     glViewport(0, 0, frame.bufferSize.x, frame.bufferSize.y);
@@ -581,7 +614,7 @@ void renderExecuteFrame(const Frame& frame)
 
     gbuffer.shader.bind();
 
-    gbuffer.shader.uniformMat4("view", camera.view);
+    gbuffer.shader.uniformMat4("view", activeCamera.view);
     gbuffer.shader.uniformMat4("projection", projection.matrix);
 
     for(const Model& model: models)
@@ -591,6 +624,13 @@ void renderExecuteFrame(const Frame& frame)
         for(int i = 0; i < model.meshCount; ++i)
         {
             const Mesh& mesh = meshes[model.idxMesh + i];
+            ++maxMesh;
+
+            if(config.frustumCulling && cull(frustum, mesh.bbox, model.transform))
+                continue;
+
+            ++numMesh;
+
             const Material& material = materials[mesh.idxMaterial];
 
             gbuffer.shader.uniform3f("colorDiffuse", outputView == VIEW_WIREFRAME ? vec3(1.f) : material.colorDiffuse);
@@ -633,7 +673,7 @@ void renderExecuteFrame(const Frame& frame)
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_CULL_FACE);
         ssao.shader.bind();
-        ssao.shader.uniformMat4("view", camera.view);
+        ssao.shader.uniformMat4("view", activeCamera.view);
         ssao.shader.uniformMat4("projection", projection.matrix);
         ssao.shader.uniform1f("radius", ssao.radius);
         bindTexture(gbuffer.positions, UNIT_POSITION);
@@ -669,7 +709,7 @@ void renderExecuteFrame(const Frame& frame)
         hdr.shaderLightPass.uniformMat4("lightSpaceMatrix", lightSpaceMatrix);
         hdr.shaderLightPass.uniform3f("light_dir", normalize(light.pos));
         hdr.shaderLightPass.uniform3f("light_color", light.color);
-        hdr.shaderLightPass.uniform3f("cameraPos", camera.pos);
+        hdr.shaderLightPass.uniform3f("cameraPos", activeCamera.pos);
         hdr.shaderLightPass.uniform1i("enableAmbient", config.ambient);
         hdr.shaderLightPass.uniform1i("enableDiffuse", config.diffuse);
         hdr.shaderLightPass.uniform1i("enableSpecular", config.specular);
@@ -684,30 +724,44 @@ void renderExecuteFrame(const Frame& frame)
         glBindVertexArray(quad.vao);
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
-        // forward rendering; sky and light sources
+        // forward rendering; light, sky, camera
         glEnable(GL_DEPTH_TEST);
-
         shaderPlainColor.bind();
-
-        shaderPlainColor.uniformMat4("view", camera.view);
+        shaderPlainColor.uniformMat4("view", activeCamera.view);
         shaderPlainColor.uniformMat4("projection", projection.matrix);
 
-        const Mesh& mesh = meshes[sphereModel.idxMesh];
-        glBindVertexArray(mesh.vao);
+        {
+            const Mesh& mesh = meshes[sphereModel.idxMesh];
+            glBindVertexArray(mesh.vao);
 
-        shaderPlainColor.uniformMat4("model", translate(light.pos) * scale(vec3(light.scale)));
-        shaderPlainColor.uniform3f("color", light.color);
+            shaderPlainColor.uniformMat4("model", translate(light.pos) * scale(vec3(light.scale)));
+            shaderPlainColor.uniform3f("color", light.color);
 
-        glEnable(GL_CULL_FACE);
-        glDrawElements(GL_TRIANGLES, mesh.numIndices, GL_UNSIGNED_INT,
-                       reinterpret_cast<const void*>(mesh.indicesOffset));
+            glEnable(GL_CULL_FACE);
+            glDrawElements(GL_TRIANGLES, mesh.numIndices, GL_UNSIGNED_INT,
+                           reinterpret_cast<const void*>(mesh.indicesOffset));
 
-        shaderPlainColor.uniformMat4("model", scale(vec3(10000)));
-        shaderPlainColor.uniform3f("color", vec3(0.1f, 0.1f, 1.f));
+            shaderPlainColor.uniformMat4("model", scale(vec3(10000)));
+            shaderPlainColor.uniform3f("color", vec3(0.1f, 0.1f, 1.f));
 
-        glDisable(GL_CULL_FACE); // we are rendering the inside of a sphere
-        glDrawElements(GL_TRIANGLES, mesh.numIndices, GL_UNSIGNED_INT,
-                       reinterpret_cast<const void*>(mesh.indicesOffset));
+            glDisable(GL_CULL_FACE); // we are rendering the inside of a sphere
+            glDrawElements(GL_TRIANGLES, mesh.numIndices, GL_UNSIGNED_INT,
+                           reinterpret_cast<const void*>(mesh.indicesOffset));
+        }
+
+        if(config.debugCamera)
+        {
+            glEnable(GL_CULL_FACE);
+
+            shaderPlainColor.uniformMat4("model", translate(camera.pos) * scale(vec3(200.f)) *
+                                         rotateY(camera.yaw + 180.f) * rotateX(-camera.pitch));
+
+            shaderPlainColor.uniform3f("color", vec3(1.f, 0.f, 0.f));
+            const Mesh& mesh = meshes[cameraModel.idxMesh];
+            glBindVertexArray(mesh.vao);
+            glDrawElements(GL_TRIANGLES, mesh.numIndices, GL_UNSIGNED_INT,
+                           reinterpret_cast<const void*>(mesh.indicesOffset));
+        }
     }
 
     // render to a default framebuffer
@@ -794,8 +848,20 @@ void renderExecuteFrame(const Frame& frame)
     ImGui::Checkbox("sRGB output", &config.srgbOutput);
     ImGui::Checkbox("shadows", &config.shadows);
     ImGui::Checkbox("ssao", &config.ssao);
-    ImGui::Checkbox("debug UV diffuse texture", &config.debugUvs);
     ImGui::SliderFloat("ssao radius", &ssao.radius, 0.f, 50.f);
+    ImGui::Checkbox("debug UV diffuse texture", &config.debugUvs);
+    ImGui::Checkbox("frustum culling", &config.frustumCulling);
+    ImGui::Text("rendered %d out of %d meshes", numMesh, maxMesh);
+
+    const char* cameraItems[] = {
+        "off",
+        "on",
+        "on with control"
+    };
+
+    ImGui::Spacing();
+    ImGui::ListBox("frustum debug camera", &config.debugCamera, cameraItems,
+                   getSize(cameraItems), getSize(cameraItems) + 1);
 
     const char* items[VIEW_COUNT] = {
         "depth",
@@ -949,9 +1015,21 @@ static void loadModel(const char* filename, Array<Model>& models, Array<Mesh>& m
         vertexData.clear();
         vertexData.reserve(aimesh.mNumVertices * floatsPerVertex);
 
+        float xmin = 0.f, xmax = 0.f, ymin = 0.f, ymax = 0.f, zmin = 0.f, zmax = 0.f;
+
         for(unsigned idxVert = 0; idxVert < aimesh.mNumVertices; ++idxVert)
         {
             const aiVector3D v = aimesh.mVertices[idxVert];
+
+            xmin = min(xmin, v.x);
+            xmax = max(xmax, v.x);
+
+            ymin = min(ymin, v.y);
+            ymax = max(ymax, v.y);
+
+            zmin = min(zmin, v.z);
+            zmax = max(zmax, v.z);
+
             vertexData.pushBack(v.x);
             vertexData.pushBack(v.y);
             vertexData.pushBack(v.z);
@@ -1000,6 +1078,10 @@ static void loadModel(const char* filename, Array<Model>& models, Array<Mesh>& m
         meshes.pushBack({});
         Mesh& mesh = meshes.back();
         ++model.meshCount;
+
+        mesh.bbox = {{ {xmin, ymin, zmin}, {xmax, ymin, zmin}, {xmin, ymax, zmin}, {xmax, ymax, zmin},
+                       {xmin, ymin, zmax}, {xmax, ymin, zmax}, {xmin, ymax, zmax}, {xmax, ymax, zmax} }};
+
         mesh.numIndices = indices.size();
         mesh.idxMaterial = aimesh.mMaterialIndex + materialOffset;
         

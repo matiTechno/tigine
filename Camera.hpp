@@ -21,6 +21,7 @@ struct Camera3d
 
     // get after update()
     mat4 view;
+    vec3 dir;
     vec3 pos = { 0.f, 0.2f, 1.2f };
     // degrees
     float pitch = 0.f;
