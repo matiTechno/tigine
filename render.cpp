@@ -724,7 +724,7 @@ void renderExecuteFrame(const Frame& frame)
         glBindVertexArray(quad.vao);
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
-        // forward rendering; light, sky, camera
+        // forward rendering; light, sky, camera, frustum planes
         glEnable(GL_DEPTH_TEST);
         shaderPlainColor.bind();
         shaderPlainColor.uniformMat4("view", activeCamera.view);
@@ -753,7 +753,7 @@ void renderExecuteFrame(const Frame& frame)
         {
             glEnable(GL_CULL_FACE);
 
-            shaderPlainColor.uniformMat4("model", translate(camera.pos) * scale(vec3(200.f)) *
+            shaderPlainColor.uniformMat4("model", translate(-camera.dir * 100.f) * translate(camera.pos) * scale(vec3(200.f)) *
                                          rotateY(camera.yaw + 180.f) * rotateX(-camera.pitch));
 
             shaderPlainColor.uniform3f("color", vec3(1.f, 0.f, 0.f));
@@ -761,6 +761,45 @@ void renderExecuteFrame(const Frame& frame)
             glBindVertexArray(mesh.vao);
             glDrawElements(GL_TRIANGLES, mesh.numIndices, GL_UNSIGNED_INT,
                            reinterpret_cast<const void*>(mesh.indicesOffset));
+
+            // frustum planes
+            vec3 vertices[] = {
+                camera.pos, frustum.farLeftTop, frustum.farLeftBot,
+                camera.pos, frustum.farRightTop, frustum.farRightBot,
+                camera.pos, frustum.farLeftBot, frustum.farRightBot,
+                camera.pos, frustum.farLeftTop, frustum.farRightTop
+            };
+
+            GLuint vao;
+            GLuint bo;
+
+            glGenVertexArrays(1, &vao);
+            glGenBuffers(1, &bo);
+
+            glBindBuffer(GL_ARRAY_BUFFER, bo);
+            glBufferData(GL_ARRAY_BUFFER, sizeof vertices, vertices, GL_STATIC_DRAW);
+
+            glBindVertexArray(vao);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+            glEnableVertexAttribArray(0);
+
+            glDisable(GL_CULL_FACE);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+            shaderPlainColor.uniformMat4("model", mat4());
+            shaderPlainColor.uniform3f("color", vec3(0.f, 1.f, 0.f));
+            glDrawArrays(GL_TRIANGLES, 0, 12);
+
+            glDisable(GL_BLEND);
+
+            for(int i = 0; i < 4; ++i)
+                glDrawArrays(GL_LINE_LOOP, i * 3, 3);
+
+            glDepthMask(GL_TRUE);
+
+            glDeleteVertexArrays(1, &vao);
+            glDeleteBuffers(1, &bo);
         }
     }
 

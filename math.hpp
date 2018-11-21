@@ -433,6 +433,12 @@ enum
 struct Frustum
 {
     Plane planes[PLANE_COUNT];
+
+    // data for debug visualization
+    vec3 farLeftBot;
+    vec3 farLeftTop;
+    vec3 farRightBot;
+    vec3 farRightTop;
 };
 
 // up and cameraDir must be normalized
@@ -446,11 +452,11 @@ inline Frustum createFrustum(vec3 cameraPos, vec3 up, vec3 cameraDir,
 
     Frustum frustum;
 
-    vec3 x_axis = cross(cameraDir, up);
+    vec3 x_axis = normalize(cross(cameraDir, up));
     vec3 y_axis = cross(x_axis, cameraDir);
 
     vec3 nearPlaneCenter = cameraPos + cameraDir * near;
-    vec3 farPlaneCenter = cameraPos + cameraDir * far;
+    vec3 farPlaneCenter =  cameraPos + cameraDir * far;
 
     frustum.planes[PLANE_NEAR] = {nearPlaneCenter, cameraDir};
     frustum.planes[PLANE_FAR] = {farPlaneCenter, -cameraDir};
@@ -460,25 +466,33 @@ inline Frustum createFrustum(vec3 cameraPos, vec3 up, vec3 cameraDir,
     float right = aspect * top;
 
     {
-        vec3 parallel = normalize( (nearPlaneCenter + top * y_axis) - cameraPos);
+        vec3 parallel = normalize( (nearPlaneCenter + y_axis * top) - cameraPos);
         vec3 normal = cross(parallel, x_axis);
         frustum.planes[PLANE_TOP] = {cameraPos, normal};
     }
     {
-        vec3 parallel = normalize( (nearPlaneCenter - top * y_axis) - cameraPos);
+        vec3 parallel = normalize( (nearPlaneCenter + -y_axis * top) - cameraPos);
         vec3 normal = cross(x_axis, parallel);
         frustum.planes[PLANE_BOTTOM] = {cameraPos, normal};
     }
     {
-        vec3 parallel = normalize( (nearPlaneCenter + right * x_axis) - cameraPos);
+        vec3 parallel = normalize( (nearPlaneCenter + x_axis * right) - cameraPos);
         vec3 normal = cross(y_axis, parallel);
         frustum.planes[PLANE_RIGHT] = {cameraPos, normal};
     }
     {
-        vec3 parallel = normalize( (nearPlaneCenter - right * x_axis) - cameraPos);
+        vec3 parallel = normalize( (nearPlaneCenter + -x_axis * right) - cameraPos);
         vec3 normal = cross(parallel, y_axis);
         frustum.planes[PLANE_LEFT] = {cameraPos, normal};
     }
+
+    float farTop = tanf(fovy) * far;
+    float farRight = aspect * farTop;
+
+    frustum.farLeftBot =  farPlaneCenter + -x_axis * farRight + -y_axis * farTop;
+    frustum.farLeftTop =  farPlaneCenter + -x_axis * farRight +  y_axis * farTop;
+    frustum.farRightBot = farPlaneCenter +  x_axis * farRight + -y_axis * farTop;
+    frustum.farRightTop = farPlaneCenter +  x_axis * farRight +  y_axis * farTop;
 
     return frustum;
 }
