@@ -119,6 +119,7 @@ void renderExecuteFrame(const Frame& frame)
     static Model sphereModel;
     static Model cameraModel;
     static Array<Model> models;
+    static Array<Model> frustumDebugModels;
     static Array<Mesh> meshes;
     static Array<Material> materials;
     static Array<GLuint> textures;
@@ -144,6 +145,7 @@ void renderExecuteFrame(const Frame& frame)
         bool debugUvs = false;
         bool frustumCulling = true;
         int debugCamera = DEBUG_CAMERA_OFF;
+        bool frustumDebugScene;
     } static config;
 
     struct
@@ -237,6 +239,30 @@ void renderExecuteFrame(const Frame& frame)
         loadModel("data/camera.obj", models, meshes, materials, textures, texIds);
         cameraModel = models.front();
         models.popBack();
+
+        loadModel("data/plane.obj", frustumDebugModels, meshes, materials, textures, texIds);
+        frustumDebugModels.back().transform = translate({0.f, -300.f, 0.f}) * scale(vec3(5000.f));
+
+        loadModel("data/cyborg/cyborg.obj", frustumDebugModels, meshes, materials, textures, texIds);
+        {
+            // this must not be a reference (pointer invalidation)
+            Model prototype = frustumDebugModels.back();
+            prototype.transform = scale(vec3(50.f));
+
+            for(int i = 0; i < 99; ++i)
+            {
+                Model model = prototype;
+
+                model.transform =
+                        translate(vec3(randomFloat() * 2.f - 1.f, randomFloat() * 0.3f, randomFloat() * 2.f - 1.f) * 2000.f) *
+                        rotateY(randomFloat() * 360.f) *
+                        rotateX(randomFloat() * 360.f) *
+                        scale(vec3(randomFloat() + 1.f)) *
+                        model.transform;
+
+                frustumDebugModels.pushBack(model);
+            }
+        }
 
         loadModel("data/sponza/sponza.obj", models, meshes, materials, textures, texIds);
 
@@ -570,6 +596,8 @@ void renderExecuteFrame(const Frame& frame)
             lookAt(normalize(lpos) * size, vec3(0.f), vec3(0.f, 1.f, 0.f));
     }
 
+    Array<Model>& activeModels = config.frustumDebugScene ? frustumDebugModels : models;
+
     // render shadow map
     if(outputView == VIEW_FINAL || outputView == VIEW_SHADOWMAP)
     {
@@ -585,7 +613,7 @@ void renderExecuteFrame(const Frame& frame)
             shadowMap.shader.bind();
             shadowMap.shader.uniformMat4("lightSpaceMatrix", lightSpaceMatrix);
 
-            for(const Model& model: models)
+            for(const Model& model: activeModels)
             {
                 shadowMap.shader.uniformMat4("model", model.transform);
 
@@ -617,7 +645,7 @@ void renderExecuteFrame(const Frame& frame)
     gbuffer.shader.uniformMat4("view", activeCamera.view);
     gbuffer.shader.uniformMat4("projection", projection.matrix);
 
-    for(const Model& model: models)
+    for(const Model& model: activeModels)
     {
         gbuffer.shader.uniformMat4("model", model.transform);
 
@@ -741,12 +769,15 @@ void renderExecuteFrame(const Frame& frame)
             glDrawElements(GL_TRIANGLES, mesh.numIndices, GL_UNSIGNED_INT,
                            reinterpret_cast<const void*>(mesh.indicesOffset));
 
-            shaderPlainColor.uniformMat4("model", scale(vec3(10000)));
-            shaderPlainColor.uniform3f("color", vec3(0.1f, 0.1f, 1.f));
+            if(!config.frustumDebugScene)
+            {
+                shaderPlainColor.uniformMat4("model", scale(vec3(10000)));
+                shaderPlainColor.uniform3f("color", vec3(0.1f, 0.1f, 1.f));
 
-            glDisable(GL_CULL_FACE); // we are rendering the inside of a sphere
-            glDrawElements(GL_TRIANGLES, mesh.numIndices, GL_UNSIGNED_INT,
-                           reinterpret_cast<const void*>(mesh.indicesOffset));
+                glDisable(GL_CULL_FACE); // we are rendering the inside of a sphere
+                glDrawElements(GL_TRIANGLES, mesh.numIndices, GL_UNSIGNED_INT,
+                               reinterpret_cast<const void*>(mesh.indicesOffset));
+            }
         }
 
         if(config.debugCamera)
@@ -890,7 +921,8 @@ void renderExecuteFrame(const Frame& frame)
     ImGui::SliderFloat("ssao radius", &ssao.radius, 0.f, 50.f);
     ImGui::Checkbox("debug UV diffuse texture", &config.debugUvs);
     ImGui::Checkbox("frustum culling", &config.frustumCulling);
-    ImGui::Text("rendered %d out of %d meshes", numMesh, maxMesh);
+    ImGui::Checkbox("frustum debug scene", &config.frustumDebugScene);
+    ImGui::TextColored({1.f, 0.5f, 0.f, 1.f}, "rendered %d out of %d meshes", numMesh, maxMesh);
 
     const char* cameraItems[] = {
         "off",

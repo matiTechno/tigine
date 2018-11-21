@@ -22,8 +22,16 @@ uniform int enableSpecular;
 
 float calcShadow(vec3 lightSpacePosition)
 {
+    // we don't have to do perspective division
+    // light projection is orthographic (w = 1.0)
+
     vec3 posWindowSpace = lightSpacePosition * 0.5 + 0.5;
     float fragDepth = posWindowSpace.z;
+
+    // don't show shadows outside of light projection
+    if(fragDepth > 1.f)
+        return 0.0;
+
     float bias = 0.005;
     float shadow = 0.0;
     vec2 texelSize = vec2(1.0) / textureSize(samplerShadowMap, 0);
