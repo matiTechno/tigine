@@ -502,6 +502,9 @@ struct BoundingBox
     vec3 vertices[8];
 };
 
+// http://cgvr.informatik.uni-bremen.de/teaching/cg_literatur/lighthouse3d_view_frustum_culling/index.html
+// we do are not doing 'full-testing', some objects that lay outside of frustum may be issued to a gpu
+
 inline bool cull(const Frustum& frustum, const BoundingBox& bbox, const mat4& transform)
 {
     for(const Plane& plane: frustum.planes)

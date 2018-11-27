@@ -52,6 +52,22 @@ struct Shader
         }
     }
 
+    void uniformMat4v(const char* uname, int count, const mat4* mat)
+    {
+        if(programId)
+        {
+            // there is some confusion with glGetActiveUniform for array uniforms
+            const int location = glGetUniformLocation(programId, uname);
+            if(location == -1)
+            {
+                log("shader '%s': uniform '%s' is inactive", id, uname);
+                return;
+            }
+
+            glUniformMatrix4fv(location, count, GL_FALSE, &mat->i.x);
+        }
+    }
+
     void uniform3f(const char* uname, vec3 v)
     {
         if(programId)

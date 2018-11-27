@@ -15,9 +15,204 @@
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
 
+#include <vector>
+#include <string>
+#include <map>
+
 static float randomFloat()
 {
     return rand() / float(RAND_MAX);
+}
+
+enum
+{
+    MAX_WEIGHTS = 4,
+    MAX_BONES = 64
+};
+
+struct PositionKey
+{
+    // transformation relative to parent bone
+    vec3 position;
+    float timestamp;
+};
+
+struct RotationKey
+{
+    vec4 rotation;
+    float timestamp;
+};
+
+struct ScaleKey
+{
+    vec3 scale;
+    float timestamp;
+};
+
+struct BoneKeys
+{
+    std::vector<PositionKey> positionKeys;
+    std::vector<RotationKey> rotationKeys;
+    std::vector<ScaleKey> scaleKeys;
+};
+
+struct Animation
+{
+    std::string name;
+    float duration;
+    std::map<int, BoneKeys> boneKeys;
+};
+
+struct Bone
+{
+    int idx = MAX_BONES; // MAX_BONES - does not affect any vertices
+    std::vector<Bone> children;
+
+    union
+    {
+        // when a bone is not animated it is used as replacement for interpolated transformation;
+        // relative to parent bone
+        mat4 transform;
+
+        mat4 transformFromMeshToBoneSpace;
+    };
+};
+
+struct Skeleton
+{
+    std::vector<Animation> animations;
+    Bone rootBone;
+};
+
+static mat4 interpolateTranslation(const std::vector<PositionKey>& keys, float time)
+{
+    vec3 translation;
+
+    if(keys.size() == 1)
+        translation = keys.front().position;
+    else
+    {
+        int currentKeyIdx = -1;
+
+        for(int i = 0; i < keys.size() - 1; ++i)
+        {
+            if(time < keys[i + 1].timestamp)
+            {
+                currentKeyIdx = i;
+                break;
+            }
+        }
+
+        assert(currentKeyIdx != -1);
+
+        PositionKey currentKey = keys[currentKeyIdx];
+        PositionKey nextKey = keys[currentKeyIdx + 1];
+
+        vec3 start = currentKey.position;
+        vec3 end = nextKey.position;
+        float transition = (time - currentKey.timestamp) / (nextKey.timestamp - currentKey.timestamp);
+        translation = start + transition * (end - start);
+    }
+
+    return translate(translation);
+}
+
+// todo: replace aiQuaternion with own quaternion code
+static mat4 interpolateRotation(const std::vector<RotationKey>& keys, float time)
+{
+    vec4 rotation;
+
+    if(keys.size() == 1)
+        rotation = keys.front().rotation;
+    else
+    {
+        int currentKeyIdx = -1;
+
+        for(int i = 0; i < keys.size() - 1; ++i)
+        {
+            if(time < keys[i + 1].timestamp)
+            {
+                currentKeyIdx = i;
+                break;
+            }
+        }
+
+        assert(currentKeyIdx != -1);
+
+        RotationKey currentKey = keys[currentKeyIdx];
+        RotationKey nextKey = keys[currentKeyIdx + 1];
+
+        vec4 start = currentKey.rotation;
+        vec4 end = nextKey.rotation;
+        float transition = (time - currentKey.timestamp) / (nextKey.timestamp - currentKey.timestamp);
+        aiQuaternion aistart = {start.w, start.x, start.y, start.z};
+        aiQuaternion aiend = {end.w, end.x, end.y, end.z};
+        aiQuaternion airesult;
+        aiQuaternion::Interpolate(airesult, aistart, aiend, transition);
+        rotation = {airesult.x, airesult.y, airesult.z, airesult.w};
+    }
+
+    aiQuaternion aiq = {rotation.w, rotation.x, rotation.y, rotation.z};
+    aiMatrix4x4 aimat(aiq.GetMatrix());
+    mat4 mat;
+    memcpy(&mat[0][0], &aimat[0][0], sizeof(mat));
+    return transpose(mat);
+}
+
+static mat4 interpolateScale(const std::vector<ScaleKey>& keys, float time)
+{
+    vec3 scale;
+
+    if(keys.size() == 1)
+        scale = keys.front().scale;
+    else
+    {
+        int currentKeyIdx = -1;
+
+        for(int i = 0; i < keys.size() - 1; ++i)
+        {
+            if(time < keys[i + 1].timestamp)
+            {
+                currentKeyIdx = i;
+                break;
+            }
+        }
+
+        assert(currentKeyIdx != -1);
+
+        ScaleKey currentKey = keys[currentKeyIdx];
+        ScaleKey nextKey = keys[currentKeyIdx + 1];
+
+        vec3 start = currentKey.scale;
+        vec3 end = nextKey.scale;
+        float transition = (time - currentKey.timestamp) / (nextKey.timestamp - currentKey.timestamp);
+        scale = start + transition * (end - start);
+    }
+
+    return ::scale(scale);
+}
+
+static void updateBones(const Animation& animation, float time, const Bone& bone, mat4 parentTransform, mat4* boneTransformations)
+{
+    mat4 transform = bone.transform;
+
+    auto it = animation.boneKeys.find(bone.idx);
+    if(it != animation.boneKeys.end())
+    {
+        mat4 scale = interpolateScale(it->second.scaleKeys, time);
+        mat4 rotation = interpolateRotation(it->second.rotationKeys, time);
+        mat4 translation = interpolateTranslation(it->second.positionKeys, time);
+
+        transform = translation * rotation * scale;
+    }
+
+    mat4 globalTransform = parentTransform * transform;
+
+    if(bone.idx < MAX_BONES)
+        boneTransformations[bone.idx] = globalTransform * bone.transformFromMeshToBoneSpace;
+
+    for(const Bone& child: bone.children)
+        updateBones(animation, time, child, globalTransform, boneTransformations);
 }
 
 struct Mesh
@@ -35,6 +230,11 @@ struct Model
     int idxMesh;
     int meshCount = 0;
     mat4 transform;
+
+    int idxSkeleton = 0;
+    float animationTime = 0.f;
+    int currentAnimation = 0;
+    std::vector<mat4> boneTransformations;
 };
 
 enum
@@ -90,8 +290,9 @@ struct TexId
     bool srgb;
 };
 
-static void loadModel(const char* filename, Array<Model>& models, Array<Mesh>& meshes,
-        Array<Material>& materials, Array<GLuint>& textures, Array<TexId>& texIds);
+static void loadModel(const char* filename, std::vector<Model>& models, Array<Mesh>& meshes,
+                      std::vector<Skeleton>& skeletons, Array<Material>& materials,
+                      Array<GLuint>& textures, Array<TexId>& texIds);
 
 static int addTexture(const char* filename, Array<GLuint>& textures,
         Array<TexId>& texIds, bool srgb)
@@ -118,9 +319,10 @@ void renderExecuteFrame(const Frame& frame)
 {
     static Model sphereModel;
     static Model cameraModel;
-    static Array<Model> models;
-    static Array<Model> frustumDebugModels;
+    static std::vector<Model> models;
+    static std::vector<Model> testModels;
     static Array<Mesh> meshes;
+    static std::vector<Skeleton> skeletons;
     static Array<Material> materials;
     static Array<GLuint> textures;
     static Array<TexId> texIds;
@@ -145,7 +347,7 @@ void renderExecuteFrame(const Frame& frame)
         bool debugUvs = false;
         bool frustumCulling = true;
         int debugCamera = DEBUG_CAMERA_OFF;
-        bool frustumDebugScene;
+        bool testScene;
     } static config;
 
     struct
@@ -171,6 +373,7 @@ void renderExecuteFrame(const Frame& frame)
         GLuint colorDiffuse;
         GLuint colorSpecular;
         Shader shader;
+        Shader shaderAnim;
     } static gbuffer;
 
     struct ShadowMap
@@ -179,6 +382,7 @@ void renderExecuteFrame(const Frame& frame)
         GLuint depthBuffer;
         GLuint framebuffer;
         Shader shader;
+        Shader shaderAnim;
     } static shadowMap;
 
     struct
@@ -223,8 +427,9 @@ void renderExecuteFrame(const Frame& frame)
 
         addTexture("data/uv.png", textures, texIds, false);
         materials.pushBack({});
+        skeletons.push_back({});
 
-        loadModel("data/sphere.obj", models, meshes, materials, textures, texIds);
+        loadModel("data/sphere.obj", models, meshes, skeletons, materials, textures, texIds);
 
         if(models.empty())
         {
@@ -234,37 +439,37 @@ void renderExecuteFrame(const Frame& frame)
 
         // hack
         sphereModel = models.front();
-        models.popBack();
+        models.pop_back();
 
-        loadModel("data/camera.obj", models, meshes, materials, textures, texIds);
+        loadModel("data/camera.obj", models, meshes, skeletons, materials, textures, texIds);
         cameraModel = models.front();
-        models.popBack();
+        models.pop_back();
 
-        loadModel("data/plane.obj", frustumDebugModels, meshes, materials, textures, texIds);
-        frustumDebugModels.back().transform = translate({0.f, -300.f, 0.f}) * scale(vec3(5000.f));
-
-        loadModel("data/cyborg/cyborg.obj", frustumDebugModels, meshes, materials, textures, texIds);
+        loadModel("data/plane.obj", testModels, meshes, skeletons, materials, textures, texIds);
+        testModels.back().transform = translate({0.f, -300.f, 0.f}) * scale(vec3(5000.f));
+        loadModel("data/cyborg/cyborg.obj", testModels, meshes, skeletons, materials, textures, texIds);
+        testModels.back().transform = scale(vec3(50.f));
+        loadModel("data/goblin.dae", testModels, meshes, skeletons, materials, textures, texIds);
         {
             // this must not be a reference (pointer invalidation)
-            Model prototype = frustumDebugModels.back();
-            prototype.transform = scale(vec3(50.f));
+            const Model prototype1 = testModels.back();
+            const Model prototype2 = *(&testModels.back() - 1);
 
-            for(int i = 0; i < 99; ++i)
+            for(int i = 0; i < 97; ++i)
             {
-                Model model = prototype;
+                Model model = randomFloat() > 0.5f ? prototype1 : prototype2;
 
                 model.transform =
                         translate(vec3(randomFloat() * 2.f - 1.f, randomFloat() * 0.3f, randomFloat() * 2.f - 1.f) * 2000.f) *
                         rotateY(randomFloat() * 360.f) *
                         rotateX(randomFloat() * 360.f) *
-                        scale(vec3(randomFloat() + 1.f)) *
                         model.transform;
 
-                frustumDebugModels.pushBack(model);
+                testModels.push_back(model);
             }
         }
 
-        loadModel("data/sponza/sponza.obj", models, meshes, materials, textures, texIds);
+        loadModel("data/sponza/sponza.obj", models, meshes, skeletons, materials, textures, texIds);
 
         log("number of meshes:    %d", meshes.size());
         log("number of textures:  %d", textures.size());
@@ -298,6 +503,7 @@ void renderExecuteFrame(const Frame& frame)
         // shadow map
         {
             shadowMap.shader = createShader("glsl/shadow.vs", "glsl/shadow.fs");
+            shadowMap.shaderAnim = createShader("glsl/shadow-anim.vs", "glsl/shadow.fs");
 
             glGenTextures(1, &shadowMap.depthBuffer);
             glBindTexture(GL_TEXTURE_2D, shadowMap.depthBuffer);
@@ -326,10 +532,19 @@ void renderExecuteFrame(const Frame& frame)
         // gbuffer
         {
             gbuffer.shader = createShader("glsl/gbuffer.vs", "glsl/gbuffer.fs");
-            gbuffer.shader.bind();
-            gbuffer.shader.uniform1i("samplerDiffuse", UNIT_DIFFUSE);
-            gbuffer.shader.uniform1i("samplerSpecular", UNIT_SPECULAR);
-            gbuffer.shader.uniform1i("samplerNormal", UNIT_NORMAL);
+            gbuffer.shaderAnim = createShader("glsl/anim.vs", "glsl/gbuffer.fs");
+
+            {
+                Shader* shaders[] = {&gbuffer.shader, &gbuffer.shaderAnim};
+
+                for(Shader* shader: shaders)
+                {
+                    shader->bind();
+                    shader->uniform1i("samplerDiffuse", UNIT_DIFFUSE);
+                    shader->uniform1i("samplerSpecular", UNIT_SPECULAR);
+                    shader->uniform1i("samplerNormal", UNIT_NORMAL);
+                }
+            }
 
             glGenTextures(1, &gbuffer.depthBuffer);
             glBindTexture(GL_TEXTURE_2D, gbuffer.depthBuffer);
@@ -596,7 +811,19 @@ void renderExecuteFrame(const Frame& frame)
             lookAt(normalize(lpos) * size, vec3(0.f), vec3(0.f, 1.f, 0.f));
     }
 
-    Array<Model>& activeModels = config.frustumDebugScene ? frustumDebugModels : models;
+    std::vector<Model>& activeModels = config.testScene ? testModels : models;
+
+    for(Model& model: activeModels)
+    {
+        if(!model.idxSkeleton)
+            continue;
+
+        const Skeleton& skeleton = skeletons[model.idxSkeleton];
+        const Animation& animation = skeleton.animations[model.currentAnimation];
+        model.animationTime += frame.dt;
+        model.animationTime = fmod(model.animationTime, animation.duration);
+        updateBones(animation, model.animationTime, skeleton.rootBone, mat4(), model.boneTransformations.data());
+    }
 
     // render shadow map
     if(outputView == VIEW_FINAL || outputView == VIEW_SHADOWMAP)
@@ -610,11 +837,22 @@ void renderExecuteFrame(const Frame& frame)
             glEnable(GL_DEPTH_TEST);
             glEnable(GL_CULL_FACE);
 
-            shadowMap.shader.bind();
-            shadowMap.shader.uniformMat4("lightSpaceMatrix", lightSpaceMatrix);
+            Shader* shaders[] = {&shadowMap.shader, &shadowMap.shaderAnim};
+
+            for(Shader* shader: shaders)
+            {
+                shader->bind();
+                shader->uniformMat4("lightSpaceMatrix", lightSpaceMatrix);
+            }
 
             for(const Model& model: activeModels)
             {
+                Shader& shader = model.idxSkeleton ? shadowMap.shaderAnim : shadowMap.shader;
+                shader.bind();
+
+                if(model.idxSkeleton)
+                    shader.uniformMat4v("bones", model.boneTransformations.size(), model.boneTransformations.data());
+
                 shadowMap.shader.uniformMat4("model", model.transform);
 
                 for(int i = 0; i < model.meshCount; ++i)
@@ -630,66 +868,76 @@ void renderExecuteFrame(const Frame& frame)
         }
     }
 
+    // render gbuffer
     int numMesh = 0;
     int maxMesh = 0;
-
-    // render gbuffer
-    glBindFramebuffer(GL_FRAMEBUFFER, gbuffer.framebuffer);
-    glViewport(0, 0, frame.bufferSize.x, frame.bufferSize.y);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glEnable(GL_DEPTH_TEST);
-    glEnable(GL_CULL_FACE);
-
-    gbuffer.shader.bind();
-
-    gbuffer.shader.uniformMat4("view", activeCamera.view);
-    gbuffer.shader.uniformMat4("projection", projection.matrix);
-
-    for(const Model& model: activeModels)
     {
-        gbuffer.shader.uniformMat4("model", model.transform);
+        glBindFramebuffer(GL_FRAMEBUFFER, gbuffer.framebuffer);
+        glViewport(0, 0, frame.bufferSize.x, frame.bufferSize.y);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_CULL_FACE);
 
-        for(int i = 0; i < model.meshCount; ++i)
+        Shader* shaders[] = {&gbuffer.shader, &gbuffer.shaderAnim};
+
+        for(Shader* shader: shaders)
         {
-            const Mesh& mesh = meshes[model.idxMesh + i];
-            ++maxMesh;
+            shader->bind();
+            shader->uniformMat4("view", activeCamera.view);
+            shader->uniformMat4("projection", projection.matrix);
+        }
 
-            if(config.frustumCulling && cull(frustum, mesh.bbox, model.transform))
-                continue;
+        for(Model& model: activeModels)
+        {
+            Shader& shader = model.idxSkeleton ? gbuffer.shaderAnim : gbuffer.shader;
+            shader.bind();
 
-            ++numMesh;
+            if(model.idxSkeleton)
+                shader.uniformMat4v("bones", model.boneTransformations.size(), model.boneTransformations.data());
 
-            const Material& material = materials[mesh.idxMaterial];
+            shader.uniformMat4("model", model.transform);
 
-            gbuffer.shader.uniform3f("colorDiffuse", outputView == VIEW_WIREFRAME ? vec3(1.f) : material.colorDiffuse);
-            gbuffer.shader.uniform3f("colorSpecular", material.colorSpecular);
-
-            gbuffer.shader.uniform1i("mapDiffuse", material.idxDiffuse && outputView != VIEW_WIREFRAME);
-            gbuffer.shader.uniform1i("mapSpecular", material.idxSpecular);
-            gbuffer.shader.uniform1i("mapNormal", material.idxNormal && config.normalMaps);
-            gbuffer.shader.uniform1i("alphaTest", material.alphaTest);
-
-            if(material.idxDiffuse)
+            for(int i = 0; i < model.meshCount; ++i)
             {
-                if(config.debugUvs)
-                    bindTexture(textures[0], UNIT_DIFFUSE);
+                const Mesh& mesh = meshes[model.idxMesh + i];
+                ++maxMesh;
 
-                else if(config.srgbDiffuseTextures)
-                    bindTexture(textures[material.idxDiffuse_srgb], UNIT_DIFFUSE);
+                if(config.frustumCulling && cull(frustum, mesh.bbox, model.transform))
+                    continue;
 
-                else
-                    bindTexture(textures[material.idxDiffuse], UNIT_DIFFUSE);
+                ++numMesh;
+
+                const Material& material = materials[mesh.idxMaterial];
+
+                shader.uniform3f("colorDiffuse", outputView == VIEW_WIREFRAME ? vec3(1.f) : material.colorDiffuse);
+                shader.uniform3f("colorSpecular", material.colorSpecular);
+                shader.uniform1i("mapDiffuse", material.idxDiffuse && outputView != VIEW_WIREFRAME);
+                shader.uniform1i("mapSpecular", material.idxSpecular);
+                shader.uniform1i("mapNormal", material.idxNormal && config.normalMaps);
+                shader.uniform1i("alphaTest", material.alphaTest);
+
+                if(material.idxDiffuse)
+                {
+                    if(config.debugUvs)
+                        bindTexture(textures[0], UNIT_DIFFUSE);
+
+                    else if(config.srgbDiffuseTextures)
+                        bindTexture(textures[material.idxDiffuse_srgb], UNIT_DIFFUSE);
+
+                    else
+                        bindTexture(textures[material.idxDiffuse], UNIT_DIFFUSE);
+                }
+
+                if(material.idxSpecular)
+                    bindTexture(textures[material.idxSpecular], UNIT_SPECULAR);
+
+                if(material.idxNormal)
+                    bindTexture(textures[material.idxNormal], UNIT_NORMAL);
+
+                glBindVertexArray(mesh.vao);
+                glDrawElements(outputView == VIEW_WIREFRAME ? GL_LINES : GL_TRIANGLES, mesh.numIndices,
+                               GL_UNSIGNED_INT, reinterpret_cast<const void*>(mesh.indicesOffset));
             }
-
-            if(material.idxSpecular)
-                bindTexture(textures[material.idxSpecular], UNIT_SPECULAR);
-
-            if(material.idxNormal)
-                bindTexture(textures[material.idxNormal], UNIT_NORMAL);
-
-            glBindVertexArray(mesh.vao);
-            glDrawElements(outputView == VIEW_WIREFRAME ? GL_LINES : GL_TRIANGLES, mesh.numIndices,
-                           GL_UNSIGNED_INT, reinterpret_cast<const void*>(mesh.indicesOffset));
         }
     }
 
@@ -769,7 +1017,7 @@ void renderExecuteFrame(const Frame& frame)
             glDrawElements(GL_TRIANGLES, mesh.numIndices, GL_UNSIGNED_INT,
                            reinterpret_cast<const void*>(mesh.indicesOffset));
 
-            if(!config.frustumDebugScene)
+            if(!config.testScene)
             {
                 shaderPlainColor.uniformMat4("model", scale(vec3(10000)));
                 shaderPlainColor.uniform3f("color", vec3(0.1f, 0.1f, 1.f));
@@ -879,6 +1127,9 @@ void renderExecuteFrame(const Frame& frame)
     {
         const int size = min( min(frame.bufferSize.x, frame.bufferSize.y), int(ShadowMap::SIZE) );
         glViewport(0, 0, size, size);
+        // if the scene is dynamic then swapping between n and n + 1 frame (double buffering) produces
+        // annoying movement, that's why we clear
+        glClear(GL_COLOR_BUFFER_BIT);
         shaderDepth.bind();
         shaderDepth.uniform1i("linearize", false);
         texture = shadowMap.depthBuffer;
@@ -921,7 +1172,7 @@ void renderExecuteFrame(const Frame& frame)
     ImGui::SliderFloat("ssao radius", &ssao.radius, 0.f, 50.f);
     ImGui::Checkbox("debug UV diffuse texture", &config.debugUvs);
     ImGui::Checkbox("frustum culling", &config.frustumCulling);
-    ImGui::Checkbox("frustum debug scene", &config.frustumDebugScene);
+    ImGui::Checkbox("test scene", &config.testScene);
     ImGui::TextColored({1.f, 0.5f, 0.f, 1.f}, "rendered %d out of %d meshes", numMesh, maxMesh);
 
     const char* cameraItems[] = {
@@ -964,8 +1215,39 @@ static const char* concatenate(const char* l, const char* r)
     return buf;
 }
 
-static void loadModel(const char* filename, Array<Model>& models, Array<Mesh>& meshes,
-        Array<Material>& materials, Array<GLuint>& textures, Array<TexId>& texIds)
+struct BoneLoadData
+{
+    int idx;
+    mat4 transformFromMeshToBoneSpace;
+};
+
+void createBones(Bone& bone, const aiNode& ainode, const std::map<std::string, BoneLoadData>& boneLoadData)
+{
+    auto it = boneLoadData.find(ainode.mName.C_Str());
+
+    // if ainode is animated
+    if(it != boneLoadData.end())
+    {
+        bone.idx = it->second.idx;
+        bone.transformFromMeshToBoneSpace = it->second.transformFromMeshToBoneSpace;
+    }
+    else
+    {
+        assert(sizeof(ainode.mTransformation) == sizeof(bone.transform));
+        memcpy(&bone.transform[0][0], &ainode.mTransformation[0][0], sizeof(bone.transform));
+        bone.transform = transpose(bone.transform);
+    }
+
+    for(int i = 0; i < ainode.mNumChildren; ++i)
+    {
+        bone.children.push_back({});
+        createBones(bone.children.back(), *ainode.mChildren[i], boneLoadData);
+    }
+}
+
+static void loadModel(const char* filename, std::vector<Model>& models, Array<Mesh>& meshes,
+                      std::vector<Skeleton>& skeletons, Array<Material>& materials,
+                      Array<GLuint>& textures, Array<TexId>& texIds)
 {
     char dirpath[256];
     {
@@ -994,14 +1276,16 @@ static void loadModel(const char* filename, Array<Model>& models, Array<Mesh>& m
 
     Assimp::Importer importer;
 
-    const aiScene* const scene = importer.ReadFile(filename, aiProcess_Triangulate |
-            aiProcess_JoinIdenticalVertices | aiProcess_CalcTangentSpace);
+    const aiScene* const scene = importer.ReadFile(filename, aiProcess_Triangulate | aiProcess_JoinIdenticalVertices |
+                                                   aiProcess_CalcTangentSpace | aiProcess_LimitBoneWeights);
 
     if(!scene)
     {
         log("Assimp::Importer::ReadFile() failed, %s", filename);
         return;
     }
+
+    assert(scene->HasMeshes());
 
     const int materialOffset = materials.size();
 
@@ -1062,12 +1346,99 @@ static void loadModel(const char* filename, Array<Model>& models, Array<Mesh>& m
         materials.pushBack(material);
     }
 
-    assert(scene->HasMeshes());
+    Model model;
+
+    std::map<std::string, BoneLoadData> boneLoadData;
+
+    if(scene->HasAnimations())
+    {
+        model.idxSkeleton = skeletons.size();
+        skeletons.push_back({});
+        Skeleton& skeleton = skeletons.back();
+
+        int boneCount = 0;
+        for(unsigned idxMesh = 0; idxMesh < scene->mNumMeshes; ++idxMesh)
+        {
+            const aiMesh& aimesh = *scene->mMeshes[idxMesh];
+
+            for(int idxBone = 0; idxBone < aimesh.mNumBones; ++idxBone)
+            {
+                aiBone& aiBone = *aimesh.mBones[idxBone];
+
+                if(boneLoadData.find(aiBone.mName.C_Str()) == boneLoadData.end())
+                {
+                    assert(boneCount < MAX_BONES);
+                    boneLoadData[aiBone.mName.C_Str()].idx = boneCount;
+                    assert(sizeof(mat4) == sizeof(aiMatrix4x4));
+                    mat4& dest = boneLoadData[aiBone.mName.C_Str()].transformFromMeshToBoneSpace;
+                    memcpy(&dest[0][0], &aiBone.mOffsetMatrix[0][0], sizeof(mat4));
+                    dest = transpose(dest); // aiMatrix4x4 is row-major
+                    ++boneCount;
+                }
+            }
+        }
+
+        model.boneTransformations.resize(boneCount);
+
+        createBones(skeleton.rootBone, *(scene->mRootNode), boneLoadData);
+
+        for(unsigned idxAnim = 0; idxAnim < scene->mNumAnimations; ++idxAnim)
+        {
+            aiAnimation& aianimation = *(scene->mAnimations[idxAnim]);
+
+            Animation animation;
+            animation.duration = aianimation.mDuration * 1.f / (aianimation.mTicksPerSecond ? aianimation.mTicksPerSecond : 1.f);
+            animation.name = aianimation.mName.C_Str();
+
+            for(unsigned idxChannel = 0; idxChannel < aianimation.mNumChannels; ++idxChannel)
+            {
+                const aiNodeAnim& ainodeanim = *(aianimation.mChannels[idxChannel]);
+
+                // todo: animation node with no corresponding bones?
+                if(boneLoadData.find(ainodeanim.mNodeName.C_Str()) == boneLoadData.end())
+                    continue;
+
+                BoneKeys boneKeys;
+
+                for(unsigned idxKey = 0; idxKey < ainodeanim.mNumPositionKeys; ++idxKey)
+                {
+                    PositionKey key;
+                    key.timestamp = ainodeanim.mPositionKeys[idxKey].mTime;
+                    aiVector3D aipos = ainodeanim.mPositionKeys[idxKey].mValue;
+                    key.position = {aipos.x, aipos.y, aipos.z};
+                    boneKeys.positionKeys.push_back(key);
+                }
+
+                for(unsigned idxKey = 0; idxKey < ainodeanim.mNumRotationKeys; ++idxKey)
+                {
+                    RotationKey key;
+                    key.timestamp = ainodeanim.mRotationKeys[idxKey].mTime;
+                    aiQuaternion airotation = ainodeanim.mRotationKeys[idxKey].mValue;
+                    key.rotation = {airotation.x, airotation.y, airotation.z, airotation.w};
+                    boneKeys.rotationKeys.push_back(key);
+                }
+
+                for(unsigned idxKey = 0; idxKey < ainodeanim.mNumScalingKeys; ++idxKey)
+                {
+                    ScaleKey key;
+                    key.timestamp = ainodeanim.mScalingKeys[idxKey].mTime;
+                    aiVector3D aiscale = ainodeanim.mScalingKeys[idxKey].mValue;
+                    key.scale = {aiscale.x, aiscale.y, aiscale.z};
+                    boneKeys.scaleKeys.push_back(key);
+                }
+
+                int id = boneLoadData.at(ainodeanim.mNodeName.C_Str()).idx;
+                animation.boneKeys[id] = std::move(boneKeys);
+            }
+
+            skeleton.animations.push_back(std::move(animation));
+        }
+    }
+
+    model.idxMesh = meshes.size();
+
     Array<float> vertexData;
     Array<unsigned> indices;
-
-    Model model;
-    model.idxMesh = meshes.size();
 
     for(unsigned idxMesh = 0; idxMesh < scene->mNumMeshes; ++idxMesh)
     {
@@ -1080,8 +1451,10 @@ static void loadModel(const char* filename, Array<Model>& models, Array<Mesh>& m
         const bool hasTexCoords = aimesh.HasTextureCoords(0);
         const bool hasNormals = aimesh.HasNormals();
         const bool hasTangents = aimesh.HasTangentsAndBitangents();
+        const bool hasBones = aimesh.HasBones();
+
         const int floatsPerVertex = 3 + hasTexCoords * 2 + hasNormals * 3
-            + hasTangents * 6;
+            + hasTangents * 6 + hasBones * 8;
 
         vertexData.clear();
         vertexData.reserve(aimesh.mNumVertices * floatsPerVertex);
@@ -1092,14 +1465,22 @@ static void loadModel(const char* filename, Array<Model>& models, Array<Mesh>& m
         {
             const aiVector3D v = aimesh.mVertices[idxVert];
 
-            xmin = min(xmin, v.x);
-            xmax = max(xmax, v.x);
+            {
+                aiVector3D tv = v;
 
-            ymin = min(ymin, v.y);
-            ymax = max(ymax, v.y);
+                // this should fix bounding boxes for animated models
+                if(hasBones)
+                    tv = scene->mRootNode->mTransformation * v;
 
-            zmin = min(zmin, v.z);
-            zmax = max(zmax, v.z);
+                xmin = min(xmin, tv.x);
+                xmax = max(xmax, tv.x);
+
+                ymin = min(ymin, tv.y);
+                ymax = max(ymax, tv.y);
+
+                zmin = min(zmin, tv.z);
+                zmax = max(zmax, tv.z);
+            }
 
             vertexData.pushBack(v.x);
             vertexData.pushBack(v.y);
@@ -1134,6 +1515,44 @@ static void loadModel(const char* filename, Array<Model>& models, Array<Mesh>& m
                 vertexData.pushBack(b.x);
                 vertexData.pushBack(b.y);
                 vertexData.pushBack(b.z);
+            }
+
+            if(hasBones)
+            {
+                int count = 0;
+                int bonesIdx[MAX_WEIGHTS];
+                float weights[MAX_WEIGHTS] = {};
+
+                for(int idxBone = 0; idxBone < aimesh.mNumBones; ++idxBone)
+                {
+                    aiBone& aiBone = *aimesh.mBones[idxBone];
+
+                    for(int idxWeight = 0; idxWeight < aiBone.mNumWeights; ++idxWeight)
+                    {
+                        assert(count < MAX_WEIGHTS);
+
+                        aiVertexWeight& aivw = aiBone.mWeights[idxWeight];
+                        if(aivw.mVertexId == idxVert)
+                        {
+                            bonesIdx[count] = boneLoadData.at(aiBone.mName.C_Str()).idx;
+                            weights[count] = aivw.mWeight;
+                            ++count;
+                            break;
+                        }
+                    }
+                }
+
+                assert(sizeof(int) == sizeof(float));
+
+                for(int idx: bonesIdx)
+                {
+                    vertexData.pushBack({});
+                    int* back = (int*)&vertexData.back();
+                    *back = idx;
+                }
+
+                for(float weight: weights)
+                    vertexData.pushBack(weight);
             }
         }
 
@@ -1214,8 +1633,23 @@ static void loadModel(const char* filename, Array<Model>& models, Array<Mesh>& m
             offset += 3 * sizeof(float);
         }
 
+        if(hasBones)
+        {
+            glVertexAttribIPointer( 5, 4, GL_INT, stride,
+                    reinterpret_cast<const void*>(offset) );
+
+            glEnableVertexAttribArray(5);
+            offset += 4 * sizeof(float);
+
+            glVertexAttribPointer( 6, 4, GL_FLOAT, GL_FALSE, stride,
+                    reinterpret_cast<const void*>(offset) );
+
+            glEnableVertexAttribArray(6);
+            offset += 4 * sizeof(float);
+        }
+
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.bo);
     }
 
-    models.pushBack(model);
+    models.push_back(model);
 }
