@@ -1529,11 +1529,12 @@ static void loadModel(const char* filename, std::vector<Model>& models, Array<Me
 
                     for(int idxWeight = 0; idxWeight < aiBone.mNumWeights; ++idxWeight)
                     {
-                        assert(count < MAX_WEIGHTS);
 
                         aiVertexWeight& aivw = aiBone.mWeights[idxWeight];
+
                         if(aivw.mVertexId == idxVert)
                         {
+                            assert(count < MAX_WEIGHTS);
                             bonesIdx[count] = boneLoadData.at(aiBone.mName.C_Str()).idx;
                             weights[count] = aivw.mWeight;
                             ++count;
